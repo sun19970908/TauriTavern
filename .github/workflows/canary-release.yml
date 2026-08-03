@@ -282,7 +282,7 @@ jobs:
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Enable HTTP access for standard mobile bundle
-        run: ./scripts/ci/configure-mobile-http.sh enable "${{ matrix.mobile }}"
+        run: bash ./scripts/ci/configure-mobile-http.sh enable "${{ matrix.mobile }}"
 
       - name: Build mobile bundle
         uses: tauri-apps/tauri-action@v1
