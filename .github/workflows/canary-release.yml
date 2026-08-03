@@ -181,7 +181,7 @@ jobs:
         include:
           - mobile: android
             platform: ubuntu-latest
-            args: --verbose --apk --split-per-abi --target aarch64 armv7
+            args: --verbose --apk --split-per-abi --target aarch64
           - mobile: ios
             platform: macos-latest
             args: --verbose
@@ -201,7 +201,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.mobile == 'android' && 'aarch64-linux-android,armv7-linux-androideabi' || 'aarch64-apple-ios' }}
+          targets: ${{ matrix.mobile == 'android' && 'aarch64-linux-android' || 'aarch64-apple-ios' }}
 
       - name: Setup JDK
         if: matrix.mobile == 'android'
