@@ -59,7 +59,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Enable HTTP access for Android
-        run: ./scripts/ci/configure-mobile-http.sh enable android
+        run: bash ./scripts/ci/configure-mobile-http.sh enable android
 
       - name: Build Android APK
         uses: tauri-apps/tauri-action@v1
