@@ -61,6 +61,27 @@ jobs:
       - name: Enable HTTP access for Android
         run: bash ./scripts/ci/configure-mobile-http.sh enable android
 
+      - name: Setup debug signing for release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYSTORE="$RUNNER_TEMP/debug.jks"
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE" \
+            -storepass android \
+            -keypass android \
+            -alias debug \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Debug, OU=Debug, O=Debug, L=Debug, ST=Debug, C=US"
+          cd src-tauri/crates/tauritavern/gen/android
+          cat > keystore.properties <<EOF
+          keyAlias=debug
+          password=android
+          storeFile=$KEYSTORE
+          EOF
+
       - name: Build Android APK
         uses: tauri-apps/tauri-action@v1
         env:
