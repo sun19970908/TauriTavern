@@ -182,7 +182,7 @@ jobs:
         include:
           - mobile: android
             platform: ubuntu-latest
-            args: --verbose --apk --split-per-abi --target aarch64
+            args: --verbose --apk --debug --target aarch64
 
     concurrency:
       group: ${{ matrix.mobile == 'ios' && 'tauritavern-public-testflight-build' || format('{0}-{1}-{2}', github.workflow, github.run_id, matrix.mobile) }}
