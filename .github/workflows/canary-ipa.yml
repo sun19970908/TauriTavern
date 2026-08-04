@@ -39,6 +39,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Restore execute permission for Xcode build scripts
+        shell: bash
+        run: |
+          chmod +x scripts/tauri-ios-xcode-script.sh
+          chmod +x scripts/ci/configure-mobile-http.sh || true
+
       - name: Enable HTTP access for iOS bundle
         run: bash ./scripts/ci/configure-mobile-http.sh enable ios
 
