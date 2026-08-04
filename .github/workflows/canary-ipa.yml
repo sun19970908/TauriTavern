@@ -48,13 +48,13 @@ jobs:
           set -euo pipefail
           pbx="src-tauri/crates/tauritavern/gen/apple/tauritavern.xcodeproj/project.pbxproj"
           test -f "$pbx"
-          # 去掉 DEVELOPMENT_TEAM 和 CODE_SIGN_IDENTITY，让 xcodebuild 不再要求 provisioning profile
-          sed -i '' \
-            -e '/CODE_SIGN_IDENTITY = "iPhone Developer"/d' \
-            -e '/DEVELOPMENT_TEAM = "Y82Q3U47CB"/d' \
-            "$pbx"
+          # CODE_SIGN_IDENTITY 设空，DEVELOPMENT_TEAM 替换为 Manual 签名 + 空 profile
+          perl -0pi -e '
+            s/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g;
+            s/DEVELOPMENT_TEAM = "Y82Q3U47CB";/CODE_SIGN_STYLE = Manual;\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "";/g;
+          ' "$pbx"
           echo "Patched project.pbxproj signing settings:"
-          grep -nE 'CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM' "$pbx" || echo "(none remaining)"
+          grep -nE 'CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGN_STYLE|PROVISIONING_PROFILE_SPECIFIER' "$pbx" || echo "(none remaining)"
 
       - name: Build iOS app (unsigned, skip code signing)
         uses: tauri-apps/tauri-action@v1
