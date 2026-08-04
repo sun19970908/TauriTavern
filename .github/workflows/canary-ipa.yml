@@ -62,14 +62,12 @@ jobs:
           echo "Patched project.pbxproj signing settings:"
           grep -nE 'CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGN_STYLE|PROVISIONING_PROFILE_SPECIFIER' "$pbx" || echo "(none remaining)"
 
-      - name: Build iOS app (unsigned, skip code signing)
+      - name: Build iOS app (ad-hoc signed, skip export)
         uses: tauri-apps/tauri-action@v1
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CODE_SIGN_IDENTITY: "-"
-          CODE_SIGNING_REQUIRED: "NO"
-          CODE_SIGNING_ALLOWED: "NO"
         with:
           projectPath: src-tauri/crates/tauritavern
           tauriScript: node ../../../scripts/tauri-app.mjs
@@ -105,10 +103,13 @@ jobs:
           }
           echo "Found app: $APP_DIR"
 
-          # ad-hoc 签名（不需要 Apple 账号），让 .app 带有完整 _CodeSignature 结构
-          # 这样 Sideloadly/AltStore 才能识别并替换成你的免费 Apple ID 签名
-          echo "Applying ad-hoc signature..."
-          codesign -f -s - --deep "$APP_DIR"
+          # 诊断：检查 .app 签名状态和内部结构
+          echo "--- .app contents ---"
+          ls -la "$APP_DIR"
+          echo "--- codesign verify ---"
+          codesign -dvvv "$APP_DIR" 2>&1 || echo "(no signature)"
+          echo "--- frameworks ---"
+          ls -la "$APP_DIR/Frameworks" 2>/dev/null || echo "(no Frameworks dir)"
 
           # 构造可重签 IPA：Payload/<AppName>.app
           STAGE="$RUNNER_TEMP/ipa-stage"
@@ -116,14 +117,14 @@ jobs:
           mkdir -p "$STAGE/Payload"
           cp -R "$APP_DIR" "$STAGE/Payload/"
           cd "$STAGE"
-          zip -qry "$GITHUB_WORKSPACE/TauriTavern-canary-adhoc-signed.ipa" Payload
-          echo "Ad-hoc signed IPA built at $GITHUB_WORKSPACE/TauriTavern-canary-adhoc-signed.ipa"
-          ls -lh "$GITHUB_WORKSPACE/TauriTavern-canary-adhoc-signed.ipa"
+          zip -qry "$GITHUB_WORKSPACE/TauriTavern-canary-adhoc.ipa" Payload
+          echo "Ad-hoc signed IPA built at $GITHUB_WORKSPACE/TauriTavern-canary-adhoc.ipa"
+          ls -lh "$GITHUB_WORKSPACE/TauriTavern-canary-adhoc.ipa"
 
       - name: Upload ad-hoc signed IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TauriTavern-canary-adhoc-signed-ipa
-          path: TauriTavern-canary-adhoc-signed.ipa
+          name: TauriTavern-canary-adhoc-ipa
+          path: TauriTavern-canary-adhoc.ipa
           if-no-files-found: error
           retention-days: 14
