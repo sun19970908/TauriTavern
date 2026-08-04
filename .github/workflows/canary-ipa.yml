@@ -80,7 +80,8 @@ jobs:
       - name: Manually sign .app and pack IPA
         shell: bash
         run: |
-          # 不用 set -e，让 codesign 失败不中断，方便诊断
+          # 关掉 GitHub Actions 默认的 -e -o pipefail，让 codesign/find 失败不中断
+          set +e +o pipefail
           APP_DIR=""
           for base in \
             "$HOME/Library/Developer/Xcode/DerivedData"/*/Build/Products/Release-iphoneos \
