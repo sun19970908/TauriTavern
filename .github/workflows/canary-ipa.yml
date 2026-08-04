@@ -64,6 +64,7 @@ jobs:
 
       - name: Build iOS app (unsigned, skip code signing)
         uses: tauri-apps/tauri-action@v1
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CODE_SIGN_IDENTITY: "-"
@@ -74,24 +75,32 @@ jobs:
           tauriScript: node ../../../scripts/tauri-app.mjs
           mobile: ios
           args: --verbose
+          uploadWorkflowArtifacts: false
 
       - name: Locate and repack IPA for local resigning
         shell: bash
         run: |
           set -euo pipefail
-          # tauri-action 把产物作为 workflow artifact 上传了，但本地 runner 上也有一份
-          # 找到 .xcarchive 里的 .app，打成可被 Sideloadly/AltStore 重签的 Payload 目录 IPA
-          ARCH_DIR="$RUNNER_TEMP/tt-archive"
-          mkdir -p "$ARCH_DIR"
-          # tauri-action 产物路径：src-tauri/crates/tauritavern/gen/apple/build
-          APP_DIR=$(find "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build" -name "*.app" -path "*Release-iphoneos*" -print -quit 2>/dev/null || true)
-          if [[ -z "${APP_DIR}" || ! -d "${APP_DIR}" ]]; then
-            # 兜底：找任意 Release-iphoneos 下的 .app
-            APP_DIR=$(find "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build" -name "*.app" -print -quit)
-          fi
+          # build 阶段已成功（.app 在 DerivedData），exportArchive 因无证书失败属预期
+          # 从 DerivedData 和 gen/apple/build 两个可能位置找 .app
+          APP_DIR=""
+          for base in \
+            "$HOME/Library/Developer/Xcode/DerivedData"/*/Build/Products/Release-iphoneos \
+            "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build"/*/Release-iphoneos \
+            "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build"; do
+            [[ -d "$base" ]] || continue
+            hit=$(find "$base" -maxdepth 2 -name "*.app" -print -quit 2>/dev/null || true)
+            if [[ -n "$hit" && -d "$hit" ]]; then
+              APP_DIR="$hit"
+              break
+            fi
+          done
           test -n "${APP_DIR}" && test -d "${APP_DIR}" || {
-            echo "ERROR: no .app found under gen/apple/build"
-            find "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build" -maxdepth 4 -type d 2>/dev/null | head -50
+            echo "ERROR: no .app found"
+            echo "--- DerivedData ---"
+            find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 -name "*.app" 2>/dev/null | head -20
+            echo "--- gen/apple/build ---"
+            find "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build" -maxdepth 5 -name "*.app" 2>/dev/null | head -20
             exit 1
           }
           echo "Found app: $APP_DIR"
