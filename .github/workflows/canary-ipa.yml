@@ -80,8 +80,7 @@ jobs:
       - name: Manually sign .app and pack IPA
         shell: bash
         run: |
-          set -euo pipefail
-          # build 阶段已成功（.app 在 DerivedData），exportArchive 因无证书失败属预期
+          # 不用 set -e，让 codesign 失败不中断，方便诊断
           APP_DIR=""
           for base in \
             "$HOME/Library/Developer/Xcode/DerivedData"/*/Build/Products/Release-iphoneos \
@@ -96,9 +95,7 @@ jobs:
           done
           test -n "${APP_DIR}" && test -d "${APP_DIR}" || {
             echo "ERROR: no .app found"
-            echo "--- DerivedData ---"
             find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 -name "*.app" 2>/dev/null | head -20
-            echo "--- gen/apple/build ---"
             find "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build" -maxdepth 5 -name "*.app" 2>/dev/null | head -20
             exit 1
           }
@@ -107,49 +104,48 @@ jobs:
           echo "--- .app contents ---"
           ls -la "$APP_DIR"
 
-          # 手动逐个 ad-hoc 签名（由内到外）：
-          # iOS SDK 不允许 ad-hoc，但 codesign 命令行工具不经过 SDK 检查
           echo "--- signing embedded frameworks ---"
           if [[ -d "$APP_DIR/Frameworks" ]]; then
             for fw in "$APP_DIR/Frameworks"/*; do
               echo ">> $fw"
               codesign --force --sign - --timestamp=none "$fw" 2>&1
+              echo "  exit=$?"
             done
+          else
+            echo "(no Frameworks dir)"
           fi
 
           echo "--- signing embedded dylibs ---"
           find "$APP_DIR" -name "*.dylib" -type f 2>/dev/null | while read -r dylib; do
             echo ">> $dylib"
             codesign --force --sign - --timestamp=none "$dylib" 2>&1
+            echo "  exit=$?"
           done
 
           echo "--- signing app extensions ---"
           find "$APP_DIR/PlugIns" -name "*.appex" -type d 2>/dev/null | while read -r appex; do
             echo ">> $appex"
             codesign --force --sign - --timestamp=none "$appex" 2>&1
+            echo "  exit=$?"
           done
 
           echo "--- signing main app ---"
           codesign --force --sign - --timestamp=none "$APP_DIR" 2>&1
+          MAIN_EXIT=$?
+          echo "  exit=$MAIN_EXIT"
 
           # 诊断：验证签名状态
           echo "--- verify signatures ---"
           codesign -dvvv "$APP_DIR" 2>&1 || echo "(no signature)"
-          if [[ -d "$APP_DIR/Frameworks" ]]; then
-            for fw in "$APP_DIR/Frameworks"/*; do
-              echo ">> $fw"
-              codesign -dvvv "$fw" 2>&1 || echo "  (no signature)"
-            done
-          fi
 
-          # 构造可重签 IPA：Payload/<AppName>.app
+          # 即使签名失败也尝试产出 IPA，方便本地工具再试
           STAGE="$RUNNER_TEMP/ipa-stage"
           rm -rf "$STAGE"
           mkdir -p "$STAGE/Payload"
           cp -R "$APP_DIR" "$STAGE/Payload/"
           cd "$STAGE"
           zip -qry "$GITHUB_WORKSPACE/TauriTavern-canary-adhoc.ipa" Payload
-          echo "Ad-hoc signed IPA built at $GITHUB_WORKSPACE/TauriTavern-canary-adhoc.ipa"
+          echo "IPA built at $GITHUB_WORKSPACE/TauriTavern-canary-adhoc.ipa"
           ls -lh "$GITHUB_WORKSPACE/TauriTavern-canary-adhoc.ipa"
 
       - name: Upload ad-hoc signed IPA artifact
