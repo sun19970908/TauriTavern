@@ -64,32 +64,33 @@ jobs:
           echo "Patched project.pbxproj signing settings:"
           grep -nE 'CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGN_STYLE|PROVISIONING_PROFILE_SPECIFIER' "$pbx" || echo "(none remaining)"
 
-      - name: Build iOS app with xcodebuild (ad-hoc signed)
+      - name: Build iOS app with xcodebuild (unsigned)
         shell: bash
         run: |
           set -euo pipefail
           export TAURI_APP_PATH="$GITHUB_WORKSPACE/src-tauri/crates/tauritavern"
           export TAURI_FRONTEND_PATH="$GITHUB_WORKSPACE"
 
+          # iOS SDK 不允许 ad-hoc 签名（CODE_SIGN_IDENTITY=-），
+          # 只能完全禁签，build 成功后再用 codesign 手动逐个签名
           xcodebuild build \
             -project src-tauri/crates/tauritavern/gen/apple/tauritavern.xcodeproj \
             -scheme tauritavern_iOS \
             -configuration Release \
             -sdk iphoneos \
             -arch arm64 \
-            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_ALLOWED=NO \
             -derivedDataPath ./build
 
-      - name: Diagnose and pack IPA
+      - name: Manually sign .app and pack IPA
         shell: bash
         run: |
           set -euo pipefail
           APP_DIR="./build/Build/Products/Release-iphoneos/tauritavern_iOS.app"
           test -d "$APP_DIR" || {
             echo "ERROR: $APP_DIR not found"
-            echo "--- build/Build/Products ---"
             find ./build/Build/Products -maxdepth 3 -type d 2>/dev/null | head -30
             exit 1
           }
@@ -97,12 +98,36 @@ jobs:
 
           echo "--- .app contents ---"
           ls -la "$APP_DIR"
-          echo "--- codesign verify ---"
-          codesign -dvvv "$APP_DIR" 2>&1 || echo "(no signature)"
-          echo "--- frameworks ---"
-          ls -la "$APP_DIR/Frameworks" 2>/dev/null || echo "(no Frameworks dir)"
+
+          # iOS 的 codesign 不像 macOS 那样支持 -s - 自动 ad-hoc，
+          # 但可以用 --sign - 配合 --force 强制 ad-hoc 签名（绕过 SDK 限制）
+          # 关键：必须先签内层（frameworks/dylibs），再签外层（.app）
+          echo "--- signing embedded frameworks ---"
           if [[ -d "$APP_DIR/Frameworks" ]]; then
-            echo "--- frameworks signatures ---"
+            for fw in "$APP_DIR/Frameworks"/*; do
+              echo ">> signing $fw"
+              codesign --force --sign - --timestamp=none "$fw"
+            done
+          fi
+
+          echo "--- signing embedded dylibs ---"
+          find "$APP_DIR" -name "*.dylib" -type f | while read -r dylib; do
+            echo ">> signing $dylib"
+            codesign --force --sign - --timestamp=none "$dylib"
+          done
+
+          echo "--- signing app extensions ---"
+          find "$APP_DIR/PlugIns" -name "*.appex" -type d 2>/dev/null | while read -r appex; do
+            echo ">> signing $appex"
+            codesign --force --sign - --timestamp=none "$appex"
+          done
+
+          echo "--- signing main app ---"
+          codesign --force --sign - --timestamp=none "$APP_DIR"
+
+          echo "--- verify signatures ---"
+          codesign -dvvv "$APP_DIR" 2>&1 || echo "(no signature)"
+          if [[ -d "$APP_DIR/Frameworks" ]]; then
             for fw in "$APP_DIR/Frameworks"/*; do
               echo ">> $fw"
               codesign -dvvv "$fw" 2>&1 || echo "  (no signature)"
