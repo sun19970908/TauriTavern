@@ -42,10 +42,13 @@ jobs:
       - name: Enable HTTP access for iOS bundle
         run: bash ./scripts/ci/configure-mobile-http.sh enable ios
 
-      - name: Build iOS app (unsigned, export-method debugging)
+      - name: Build iOS app (unsigned, skip code signing)
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODE_SIGN_IDENTITY: "-"
+          CODE_SIGNING_REQUIRED: "NO"
+          CODE_SIGNING_ALLOWED: "NO"
         with:
           projectPath: src-tauri/crates/tauritavern
           tauriScript: node ../../../scripts/tauri-app.mjs
