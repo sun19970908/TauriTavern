@@ -42,6 +42,20 @@ jobs:
       - name: Enable HTTP access for iOS bundle
         run: bash ./scripts/ci/configure-mobile-http.sh enable ios
 
+      - name: Strip code signing settings from Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+          pbx="src-tauri/crates/tauritavern/gen/apple/tauritavern.xcodeproj/project.pbxproj"
+          test -f "$pbx"
+          # 去掉 DEVELOPMENT_TEAM 和 CODE_SIGN_IDENTITY，让 xcodebuild 不再要求 provisioning profile
+          sed -i '' \
+            -e '/CODE_SIGN_IDENTITY = "iPhone Developer"/d' \
+            -e '/DEVELOPMENT_TEAM = "Y82Q3U47CB"/d' \
+            "$pbx"
+          echo "Patched project.pbxproj signing settings:"
+          grep -nE 'CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM' "$pbx" || echo "(none remaining)"
+
       - name: Build iOS app (unsigned, skip code signing)
         uses: tauri-apps/tauri-action@v1
         env:
