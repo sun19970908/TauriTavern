@@ -105,20 +105,25 @@ jobs:
           }
           echo "Found app: $APP_DIR"
 
+          # ad-hoc 签名（不需要 Apple 账号），让 .app 带有完整 _CodeSignature 结构
+          # 这样 Sideloadly/AltStore 才能识别并替换成你的免费 Apple ID 签名
+          echo "Applying ad-hoc signature..."
+          codesign -f -s - --deep "$APP_DIR"
+
           # 构造可重签 IPA：Payload/<AppName>.app
           STAGE="$RUNNER_TEMP/ipa-stage"
           rm -rf "$STAGE"
           mkdir -p "$STAGE/Payload"
           cp -R "$APP_DIR" "$STAGE/Payload/"
           cd "$STAGE"
-          zip -qry "$GITHUB_WORKSPACE/TauriTavern-canary-unsigned.ipa" Payload
-          echo "Unsigned IPA built at $GITHUB_WORKSPACE/TauriTavern-canary-unsigned.ipa"
-          ls -lh "$GITHUB_WORKSPACE/TauriTavern-canary-unsigned.ipa"
+          zip -qry "$GITHUB_WORKSPACE/TauriTavern-canary-adhoc-signed.ipa" Payload
+          echo "Ad-hoc signed IPA built at $GITHUB_WORKSPACE/TauriTavern-canary-adhoc-signed.ipa"
+          ls -lh "$GITHUB_WORKSPACE/TauriTavern-canary-adhoc-signed.ipa"
 
-      - name: Upload unsigned IPA artifact
+      - name: Upload ad-hoc signed IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TauriTavern-canary-unsigned-ipa
-          path: TauriTavern-canary-unsigned.ipa
+          name: TauriTavern-canary-adhoc-signed-ipa
+          path: TauriTavern-canary-adhoc-signed.ipa
           if-no-files-found: error
           retention-days: 14
