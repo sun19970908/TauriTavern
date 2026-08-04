@@ -40,7 +40,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Enable HTTP access for iOS bundle
-        run: ./scripts/ci/configure-mobile-http.sh enable ios
+        run: bash ./scripts/ci/configure-mobile-http.sh enable ios
 
       - name: Build iOS app (unsigned, export-method debugging)
         uses: tauri-apps/tauri-action@v1
