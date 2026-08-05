@@ -105,38 +105,21 @@ jobs:
           echo "--- .app contents ---"
           ls -la "$APP_DIR"
 
-          # 生成 entitlements.plist
-          # 黑屏根因：ad-hoc 签名缺 entitlements，爱思助手重签后 WKWebView
-          # 自定义协议 tauri://localhost 无法工作 -> 黑屏。
-          # 注入从正规 IPA provisioning profile 提取的 entitlements，
-          # 爱思助手重签时会替换 team-identifier/application-identifier 为用户的，
-          # 但继承 application-groups 等 WKWebView 需要的权限。
-          ENT_FILE="$RUNNER_TEMP/entitlements.plist"
-          printf '%s\n' \
-            '<?xml version="1.0" encoding="UTF-8"?>' \
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-            '<plist version="1.0">' \
-            '<dict>' \
-            '    <key>com.apple.security.application-groups</key>' \
-            '    <array>' \
-            '        <string>group.com.tauritavern.client</string>' \
-            '    </array>' \
-            '    <key>application-identifier</key>' \
-            '    <string>Y82Q3U47CB.com.tauritavern.client</string>' \
-            '    <key>keychain-access-groups</key>' \
-            '    <array>' \
-            '        <string>Y82Q3U47CB.*</string>' \
-            '        <string>com.apple.token</string>' \
-            '    </array>' \
-            '    <key>get-task-allow</key>' \
-            '    <true/>' \
-            '    <key>com.apple.developer.team-identifier</key>' \
-            '    <string>Y82Q3U47CB</string>' \
-            '</dict>' \
-            '</plist>' > "$ENT_FILE"
-          plutil -lint "$ENT_FILE" || { echo "ERROR: entitlements.plist invalid"; exit 1; }
-          echo "Generated entitlements.plist:"
-          cat "$ENT_FILE"
+          # 注入 embedded.mobileprovision
+          # 黑屏根因：ad-hoc 签名的 .app 缺 embedded.mobileprovision，爱思助手重签时
+          # 无法继承 application-groups 等 entitlements -> WKWebView 自定义协议
+          # tauri://localhost 无法工作 -> 黑屏。
+          # 从正规 IPA 提取的 mobileprovision 存为 GitHub Secret（base64），
+          # CI 解码后放入 .app。爱思助手重签时会用自己的 Apple ID 替换签名和
+          # team-identifier，但继承 mobileprovision 里的 entitlements。
+          if [[ -n "${{ secrets.IOS_MOBILE_PROVISION_BASE64 }}" ]]; then
+            echo "--- injecting embedded.mobileprovision ---"
+            base64 -d <<< "${{ secrets.IOS_MOBILE_PROVISION_BASE64 }}" > "$APP_DIR/embedded.mobileprovision"
+            ls -la "$APP_DIR/embedded.mobileprovision"
+          else
+            echo "::warning::IOS_MOBILE_PROVISION_BASE64 secret not set, .app will lack embedded.mobileprovision"
+            echo "::warning::This will cause black screen after i4tools/Sideloadly re-sign"
+          fi
 
           echo "--- signing embedded frameworks ---"
           if [[ -d "$APP_DIR/Frameworks" ]]; then
@@ -163,8 +146,8 @@ jobs:
             echo "  exit=$?"
           done
 
-          echo "--- signing main app with entitlements ---"
-          codesign --force --sign - --timestamp=none --entitlements "$ENT_FILE" "$APP_DIR" 2>&1
+          echo "--- signing main app ---"
+          codesign --force --sign - --timestamp=none "$APP_DIR" 2>&1
           MAIN_EXIT=$?
           echo "  exit=$MAIN_EXIT"
 
@@ -173,6 +156,8 @@ jobs:
           codesign -dvvv "$APP_DIR" 2>&1 || echo "(no signature)"
           echo "--- verify entitlements ---"
           codesign -d --entitlements - "$APP_DIR" 2>&1 || echo "(no entitlements)"
+          echo "--- verify mobileprovision ---"
+          ls -la "$APP_DIR/embedded.mobileprovision" 2>&1 || echo "(no embedded.mobileprovision)"
 
           # 即使签名失败也尝试产出 IPA，方便本地工具再试
           STAGE="$RUNNER_TEMP/ipa-stage"
