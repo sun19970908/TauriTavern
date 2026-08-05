@@ -112,29 +112,28 @@ jobs:
           # 爱思助手重签时会替换 team-identifier/application-identifier 为用户的，
           # 但继承 application-groups 等 WKWebView 需要的权限。
           ENT_FILE="$RUNNER_TEMP/entitlements.plist"
-          cat > "$ENT_FILE" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.application-groups</key>
-    <array>
-        <string>group.com.tauritavern.client</string>
-    </array>
-    <key>application-identifier</key>
-    <string>Y82Q3U47CB.com.tauritavern.client</string>
-    <key>keychain-access-groups</key>
-    <array>
-        <string>Y82Q3U47CB.*</string>
-        <string>com.apple.token</string>
-    </array>
-    <key>get-task-allow</key>
-    <true/>
-    <key>com.apple.developer.team-identifier</key>
-    <string>Y82Q3U47CB</string>
-</dict>
-</plist>
-PLIST
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict>' \
+            '    <key>com.apple.security.application-groups</key>' \
+            '    <array>' \
+            '        <string>group.com.tauritavern.client</string>' \
+            '    </array>' \
+            '    <key>application-identifier</key>' \
+            '    <string>Y82Q3U47CB.com.tauritavern.client</string>' \
+            '    <key>keychain-access-groups</key>' \
+            '    <array>' \
+            '        <string>Y82Q3U47CB.*</string>' \
+            '        <string>com.apple.token</string>' \
+            '    </array>' \
+            '    <key>get-task-allow</key>' \
+            '    <true/>' \
+            '    <key>com.apple.developer.team-identifier</key>' \
+            '    <string>Y82Q3U47CB</string>' \
+            '</dict>' \
+            '</plist>' > "$ENT_FILE"
           plutil -lint "$ENT_FILE" || { echo "ERROR: entitlements.plist invalid"; exit 1; }
           echo "Generated entitlements.plist:"
           cat "$ENT_FILE"
