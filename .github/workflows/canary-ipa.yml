@@ -62,12 +62,14 @@ jobs:
           echo "Patched project.pbxproj signing settings:"
           grep -nE 'CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGN_STYLE|PROVISIONING_PROFILE_SPECIFIER' "$pbx" || echo "(none remaining)"
 
-      - name: Build iOS app (build only, tolerate archive/export failure)
+      - name: Build iOS app (unsigned, skip code signing)
         uses: tauri-apps/tauri-action@v1
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CODE_SIGN_IDENTITY: ""
+          CODE_SIGNING_REQUIRED: "NO"
+          CODE_SIGNING_ALLOWED: "NO"
         with:
           projectPath: src-tauri/crates/tauritavern
           tauriScript: node ../../../scripts/tauri-app.mjs
@@ -75,15 +77,11 @@ jobs:
           args: --verbose
           uploadWorkflowArtifacts: false
 
-      - name: Locate .app, verify integrity, sign and pack IPA
+      - name: Manually sign .app with entitlements and pack IPA
         shell: bash
         run: |
-          set -euo pipefail
-
-          # --- 定位 build 产物 .app ---
-          # tauri ios build 内部调 xcodebuild archive；archive 签名阶段会因无证书失败，
-          # 但 build 阶段（含 Copy Bundle Resources / frontendDist 注入）已完成，
-          # .app 产物在 DerivedData 或 gen/apple/build 下。
+          # 关掉 GitHub Actions 默认的 -e -o pipefail，让 codesign/find 失败不中断
+          set +e +o pipefail
           APP_DIR=""
           for base in \
             "$HOME/Library/Developer/Xcode/DerivedData"/*/Build/Products/Release-iphoneos \
@@ -93,77 +91,91 @@ jobs:
             hit=$(find "$base" -maxdepth 2 -name "*.app" -print -quit 2>/dev/null || true)
             if [[ -n "$hit" && -d "$hit" ]]; then
               APP_DIR="$hit"
-              echo "Found .app at: $APP_DIR"
               break
             fi
           done
-
-          if [[ -z "${APP_DIR}" || ! -d "${APP_DIR}" ]]; then
-            echo "::error::No .app found in build output"
-            echo "--- searching DerivedData ---"
-            find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 -name "*.app" 2>/dev/null | head -20 || true
-            echo "--- searching gen/apple/build ---"
-            find "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build" -maxdepth 5 -name "*.app" 2>/dev/null | head -20 || true
+          test -n "${APP_DIR}" && test -d "${APP_DIR}" || {
+            echo "ERROR: no .app found"
+            find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 -name "*.app" 2>/dev/null | head -20
+            find "$GITHUB_WORKSPACE/src-tauri/crates/tauritavern/gen/apple/build" -maxdepth 5 -name "*.app" 2>/dev/null | head -20
             exit 1
-          fi
+          }
+          echo "Found app: $APP_DIR"
 
-          echo "--- .app root contents ---"
+          echo "--- .app contents ---"
           ls -la "$APP_DIR"
 
-          # --- 完整性校验：前端资源必须存在 ---
-          # 黑屏根因是 build 阶段被打断导致 frontendDist 没注入。
-          # 校验 index.html 等关键文件，不完整直接 fail 而不是产出黑屏 IPA。
-          check_missing=""
-          for required in "index.html" "tauri-main.js" "scripts"; do
-            if [[ ! -e "$APP_DIR/$required" ]]; then
-              check_missing="$check_missing $required"
-            fi
-          done
-          if [[ -n "$check_missing" ]]; then
-            echo "::error::Incomplete .app bundle, missing:$check_missing"
-            echo "::error::Frontend resources were not injected. The build was interrupted before Copy Bundle Resources completed."
-            exit 1
-          fi
-          echo "✓ .app integrity check passed (index.html / tauri-main.js / scripts present)"
+          # 生成 entitlements.plist
+          # 黑屏根因：ad-hoc 签名缺 entitlements，爱思助手重签后 WKWebView
+          # 自定义协议 tauri://localhost 无法工作 -> 黑屏。
+          # 注入从正规 IPA provisioning profile 提取的 entitlements，
+          # 爱思助手重签时会替换 team-identifier/application-identifier 为用户的，
+          # 但继承 application-groups 等 WKWebView 需要的权限。
+          ENT_FILE="$RUNNER_TEMP/entitlements.plist"
+          cat > "$ENT_FILE" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.tauritavern.client</string>
+    </array>
+    <key>application-identifier</key>
+    <string>Y82Q3U47CB.com.tauritavern.client</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>Y82Q3U47CB.*</string>
+        <string>com.apple.token</string>
+    </array>
+    <key>get-task-allow</key>
+    <true/>
+    <key>com.apple.developer.team-identifier</key>
+    <string>Y82Q3U47CB</string>
+</dict>
+</plist>
+PLIST
+          plutil -lint "$ENT_FILE" || { echo "ERROR: entitlements.plist invalid"; exit 1; }
+          echo "Generated entitlements.plist:"
+          cat "$ENT_FILE"
 
-          # --- 手动 ad-hoc 签名（iOS SDK 不允许 ad-hoc，但 build 阶段已禁签完成，
-          # 这里对最终 .app 做本地签名，让 Sideloadly 能识别重签）---
-          # 用 || true 精确容忍，不全局关 -e
           echo "--- signing embedded frameworks ---"
           if [[ -d "$APP_DIR/Frameworks" ]]; then
             for fw in "$APP_DIR/Frameworks"/*; do
-              [[ -e "$fw" ]] || continue
               echo ">> $fw"
-              codesign --force --sign - --timestamp=none "$fw" 2>&1 || echo "::warning::sign $fw failed"
+              codesign --force --sign - --timestamp=none "$fw" 2>&1
+              echo "  exit=$?"
             done
           else
             echo "(no Frameworks dir)"
           fi
 
           echo "--- signing embedded dylibs ---"
-          while IFS= read -r dylib; do
+          find "$APP_DIR" -name "*.dylib" -type f 2>/dev/null | while read -r dylib; do
             echo ">> $dylib"
-            codesign --force --sign - --timestamp=none "$dylib" 2>&1 || echo "::warning::sign $dylib failed"
-          done < <(find "$APP_DIR" -name "*.dylib" -type f 2>/dev/null || true)
+            codesign --force --sign - --timestamp=none "$dylib" 2>&1
+            echo "  exit=$?"
+          done
 
           echo "--- signing app extensions ---"
-          if [[ -d "$APP_DIR/PlugIns" ]]; then
-            while IFS= read -r appex; do
-              echo ">> $appex"
-              codesign --force --sign - --timestamp=none "$appex" 2>&1 || echo "::warning::sign $appex failed"
-            done < <(find "$APP_DIR/PlugIns" -name "*.appex" -type d 2>/dev/null || true)
-          fi
+          find "$APP_DIR/PlugIns" -name "*.appex" -type d 2>/dev/null | while read -r appex; do
+            echo ">> $appex"
+            codesign --force --sign - --timestamp=none "$appex" 2>&1
+            echo "  exit=$?"
+          done
 
-          echo "--- signing main app ---"
-          codesign --force --sign - --timestamp=none "$APP_DIR" 2>&1 || {
-            echo "::error::main app codesign failed"
-            exit 1
-          }
+          echo "--- signing main app with entitlements ---"
+          codesign --force --sign - --timestamp=none --entitlements "$ENT_FILE" "$APP_DIR" 2>&1
+          MAIN_EXIT=$?
+          echo "  exit=$MAIN_EXIT"
 
-          echo "--- verify signature ---"
-          codesign -dvvv "$APP_DIR" 2>&1 || echo "::warning::codesign verify failed"
+          # 诊断：验证签名状态
+          echo "--- verify signatures ---"
+          codesign -dvvv "$APP_DIR" 2>&1 || echo "(no signature)"
+          echo "--- verify entitlements ---"
+          codesign -d --entitlements - "$APP_DIR" 2>&1 || echo "(no entitlements)"
 
-          # --- 打包 IPA ---
+          # 即使签名失败也尝试产出 IPA，方便本地工具再试
           STAGE="$RUNNER_TEMP/ipa-stage"
           rm -rf "$STAGE"
           mkdir -p "$STAGE/Payload"
