@@ -130,9 +130,9 @@ jobs:
           ENT_FILE="$APP_DIR/entitlements.plist"
           if [[ -f "$APP_DIR/embedded.mobileprovision" ]]; then
             echo "--- extracting entitlements from mobileprovision ---"
-            security cms -D -d "$APP_DIR/embedded.mobileprovision" > /tmp/profile.plist 2>&1
+            security cms -D -i "$APP_DIR/embedded.mobileprovision" -o /tmp/profile.plist
             if plutil -extract Entitlements xml1 -o "$ENT_FILE" /tmp/profile.plist 2>&1; then
-              plutil -remove application-groups "$ENT_FILE" 2>/dev/null || true
+              plutil -remove com.apple.security.application-groups "$ENT_FILE" 2>/dev/null || true
               plutil -remove keychain-access-groups "$ENT_FILE" 2>/dev/null || true
               echo "--- entitlements.plist content (trimmed) ---"
               cat "$ENT_FILE"
