@@ -106,12 +106,10 @@ jobs:
           ls -la "$APP_DIR"
 
           # 注入 embedded.mobileprovision
-          # 黑屏根因：ad-hoc 签名的 .app 缺 embedded.mobileprovision，爱思助手重签时
-          # 无法继承 application-groups 等 entitlements -> WKWebView 自定义协议
-          # tauri://localhost 无法工作 -> 黑屏。
+          # ad-hoc 签名的 .app 缺 embedded.mobileprovision，爱思助手重签时
+          # 无法继承 entitlements -> WKWebView GPU 渲染被 sandbox 限制 -> 黑屏。
           # 从正规 IPA 提取的 mobileprovision 存为 GitHub Secret（base64），
-          # CI 解码后放入 .app。爱思助手重签时会用自己的 Apple ID 替换签名和
-          # team-identifier，但继承 mobileprovision 里的 entitlements。
+          # CI 解码后放入 .app。
           if [[ -n "${{ secrets.IOS_MOBILE_PROVISION_BASE64 }}" ]]; then
             echo "--- injecting embedded.mobileprovision ---"
             base64 -d <<< "${{ secrets.IOS_MOBILE_PROVISION_BASE64 }}" > "$APP_DIR/embedded.mobileprovision"
@@ -119,6 +117,31 @@ jobs:
           else
             echo "::warning::IOS_MOBILE_PROVISION_BASE64 secret not set, .app will lack embedded.mobileprovision"
             echo "::warning::This will cause black screen after i4tools/Sideloadly re-sign"
+          fi
+
+          # 从 mobileprovision 提取 entitlements，用于 codesign --entitlements
+          # 根因：ad-hoc 签名（codesign -s -）默认不嵌入 entitlements。.app 里
+          # 放了 mobileprovision 文件只能让 iOS 在正规签名流程下读取，但 ad-hoc
+          # 签名不会自动读取。必须手动 --entitlements 嵌入二进制签名，iOS 才
+          # 会在启动 WKWebView 时认可 application-identifier。
+          # 正常 IPA 二进制只嵌 3 个：application-identifier、team-identifier、
+          # get-task-allow。application-groups / keychain-access-groups 在爱思
+          # 助手用免费 Apple ID 重签时可能不支持，所以移除，只保留最小集。
+          ENT_FILE="$APP_DIR/entitlements.plist"
+          if [[ -f "$APP_DIR/embedded.mobileprovision" ]]; then
+            echo "--- extracting entitlements from mobileprovision ---"
+            security cms -D -d "$APP_DIR/embedded.mobileprovision" > /tmp/profile.plist 2>&1
+            if plutil -extract Entitlements xml1 -o "$ENT_FILE" /tmp/profile.plist 2>&1; then
+              plutil -remove application-groups "$ENT_FILE" 2>/dev/null || true
+              plutil -remove keychain-access-groups "$ENT_FILE" 2>/dev/null || true
+              echo "--- entitlements.plist content (trimmed) ---"
+              cat "$ENT_FILE"
+            else
+              echo "::warning::failed to extract entitlements from mobileprovision"
+              ENT_FILE=""
+            fi
+          else
+            ENT_FILE=""
           fi
 
           echo "--- signing embedded frameworks ---"
@@ -147,9 +170,15 @@ jobs:
           done
 
           echo "--- signing main app ---"
-          codesign --force --sign - --timestamp=none "$APP_DIR" 2>&1
-          MAIN_EXIT=$?
-          echo "  exit=$MAIN_EXIT"
+          if [[ -n "$ENT_FILE" && -f "$ENT_FILE" ]]; then
+            codesign --force --sign - --timestamp=none --entitlements "$ENT_FILE" "$APP_DIR" 2>&1
+            MAIN_EXIT=$?
+            echo "  exit=$MAIN_EXIT (with entitlements)"
+          else
+            codesign --force --sign - --timestamp=none "$APP_DIR" 2>&1
+            MAIN_EXIT=$?
+            echo "  exit=$MAIN_EXIT (no entitlements)"
+          fi
 
           # 诊断：验证签名状态
           echo "--- verify signatures ---"
@@ -158,6 +187,9 @@ jobs:
           codesign -d --entitlements - "$APP_DIR" 2>&1 || echo "(no entitlements)"
           echo "--- verify mobileprovision ---"
           ls -la "$APP_DIR/embedded.mobileprovision" 2>&1 || echo "(no embedded.mobileprovision)"
+
+          # 删除临时 entitlements.plist，不打包进 IPA
+          rm -f "$APP_DIR/entitlements.plist"
 
           # 即使签名失败也尝试产出 IPA，方便本地工具再试
           STAGE="$RUNNER_TEMP/ipa-stage"
