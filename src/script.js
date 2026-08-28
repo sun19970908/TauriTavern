@@ -594,6 +594,20 @@ function fireAndForgetSaveChat(savePromise, commitReason) {
     );
 }
 
+// [MUTATION-ASYNC-TOGGLE-20260827] mutation 保存异步开关
+// 状态由酒馆助手脚本（QR 按钮 / parent.window.__mutationAsyncToggle）写入
+// extension_settings.tavernHelperToggle.mutationAsync：
+//   true  = 异步：saveChat / post-save 均 fire-and-forget，主线程不被 IndexedDB/HTTP 写盘阻塞
+//   false（默认）= 同步：恢复原始行为，等待 chat 文件 + token/itemized 全部写盘完成
+export function isMutationAsyncEnabled() {
+    try {
+        const v = extension_settings?.tavernHelperToggle?.mutationAsync;
+        return v === undefined ? false : v === true;
+    } catch {
+        return false;
+    }
+}
+
 /**
  * Serialize all chat save operations (core + extensions) so older snapshots
  * cannot finish after and overwrite newer snapshots.
@@ -10731,14 +10745,21 @@ export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTA
         });
     });
 
-    // Fire-and-forget post-save so the UI does not block on IndexedDB writes.
-    // Snapshots are captured above, so chat switch safety is preserved.
-    postSavePromise.catch((error) => {
-        console.warn('[BYPASS-PERF-FIREFORGET] Background post-save failed:', error);
-    });
+    // [MUTATION-ASYNC-TOGGLE-20260827] 异步开关：由酒馆助手脚本 QR 按钮切换，运行时生效、无需重启。
+    // 状态存 extension_settings.tavernHelperToggle.mutationAsync，默认关（同步）。
+    if (isMutationAsyncEnabled()) {
+        // Fire-and-forget post-save so the UI does not block on IndexedDB writes.
+        // Snapshots are captured above, so chat switch safety is preserved.
+        postSavePromise.catch((error) => {
+            console.warn('[BYPASS-PERF-FIREFORGET] Background post-save failed:', error);
+        });
 
-    // [BYPASS-PERF-FIREFORGET-20260827] saveChat fire-and-forget：主线程不等 HTTP 写盘（94MB chat 全量重写阻塞 3~4.5 分钟）
-    fireAndForgetSaveChat(savePromise, commitReason);
+        // saveChat fire-and-forget：主线程不等 HTTP 写盘（94MB chat 全量重写阻塞 3~4.5 分钟）
+        fireAndForgetSaveChat(savePromise, commitReason);
+    } else {
+        // 同步模式（默认）：恢复原始行为，等 chat 文件 + token/itemized 都写盘完成再返回
+        await Promise.all([savePromise, postSavePromise]);
+    }
 }
 
 /**
