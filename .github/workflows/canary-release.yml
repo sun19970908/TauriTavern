@@ -62,7 +62,6 @@ jobs:
 
   desktop:
     needs: prepare
-    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -182,7 +181,10 @@ jobs:
         include:
           - mobile: android
             platform: ubuntu-latest
-            args: --verbose --apk --debug --target aarch64
+            args: --verbose --apk --split-per-abi --target aarch64 armv7
+          - mobile: ios
+            platform: macos-latest
+            args: --verbose
 
     concurrency:
       group: ${{ matrix.mobile == 'ios' && 'tauritavern-public-testflight-build' || format('{0}-{1}-{2}', github.workflow, github.run_id, matrix.mobile) }}
@@ -199,7 +201,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.mobile == 'android' && 'aarch64-linux-android' || 'aarch64-apple-ios' }}
+          targets: ${{ matrix.mobile == 'android' && 'aarch64-linux-android,armv7-linux-androideabi' || 'aarch64-apple-ios' }}
 
       - name: Setup JDK
         if: matrix.mobile == 'android'
@@ -282,7 +284,7 @@ jobs:
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Enable HTTP access for standard mobile bundle
-        run: bash ./scripts/ci/configure-mobile-http.sh enable "${{ matrix.mobile }}"
+        run: ./scripts/ci/configure-mobile-http.sh enable "${{ matrix.mobile }}"
 
       - name: Build mobile bundle
         uses: tauri-apps/tauri-action@v1
@@ -328,7 +330,6 @@ jobs:
 
   testflight:
     needs: [prepare, publish]
-    if: false
     permissions:
       actions: read
       contents: write
@@ -355,7 +356,6 @@ jobs:
 
   notes-context:
     needs: prepare
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -409,7 +409,6 @@ jobs:
 
   notes-ai:
     needs: notes-context
-    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -493,8 +492,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [prepare, mobile]
-    if: false
+    needs: [prepare, desktop, mobile, notes]
     runs-on: ubuntu-latest
     permissions:
       actions: read
