@@ -579,6 +579,21 @@ function updateChatSaveBusyFlag() {
     isChatSaving = pendingChatSaveTasks > 0;
 }
 
+// [BYPASS-PERF-FIREFORGET-20260827] fire-and-forget 包装 saveChat
+// 主线程不等 HTTP 写盘（94MB chat 全量重写阻塞 3~4.5 分钟）
+// 成功/失败都通过 console.log 记录，不弹窗
+function fireAndForgetSaveChat(savePromise, commitReason) {
+    const t0 = performance.now();
+    savePromise.then(
+        () => {
+            console.log(`[BYPASS-PERF-FIREFORGET] saveChat(reason=${commitReason}) SUCCESS duration=${(performance.now() - t0).toFixed(1)}ms`);
+        },
+        (error) => {
+            console.error(`[BYPASS-PERF-FIREFORGET] saveChat(reason=${commitReason}) FAILED duration=${(performance.now() - t0).toFixed(1)}ms error=${error?.message || error}`, error);
+        },
+    );
+}
+
 /**
  * Serialize all chat save operations (core + extensions) so older snapshots
  * cannot finish after and overwrite newer snapshots.
@@ -644,6 +659,14 @@ let chatVirtualizationRecoveryPromise = null;
 
 /** @param {unknown} fault @param {{ startup?: boolean }} [options] */
 function offerChatVirtualizationRecovery(fault, { startup = false } = {}) {
+    // Diagnostic: trace which call site triggered the recovery popup so we can
+    // distinguish the fault-authority path (onFault) from the startup guard.
+    console.error(
+        `[ChatSurface Recovery Popup @ ${new Date().toISOString()}] Triggered by:`,
+        fault,
+        '\n[caller stack]:',
+        new Error().stack,
+    );
     if (chatVirtualizationRecoveryPromise) {
         return chatVirtualizationRecoveryPromise;
     }
@@ -703,7 +726,32 @@ const chatSurface = installChatSurfaceRuntime({
     }),
     syncMountedViewState: syncMountedChatViewState,
     onFault: error => {
-        console.error('Bounded ChatSurface faulted:', error);
+        // Enhanced fault diagnostic: capture chat state at fault time so the
+        // root cause can be correlated with the active message / edit state.
+        const faultContext = {
+            timestamp: new Date().toISOString(),
+            chatLength: Array.isArray(chat) ? chat.length : null,
+            thisEditMesId: typeof this_edit_mes_id !== 'undefined' ? this_edit_mes_id : null,
+            hasReasoningEditor: document.querySelector('.reasoning_edit_textarea') !== null,
+            causeChain: (() => {
+                const chain = [];
+                let current = error;
+                let depth = 0;
+                while (current && depth < 10) {
+                    chain.push({
+                        depth,
+                        message: current instanceof Error ? current.message : String(current),
+                        name: current instanceof Error ? current.name : typeof current,
+                    });
+                    current = (current && typeof current === 'object' && 'cause' in current)
+                        ? current.cause
+                        : undefined;
+                    depth++;
+                }
+                return chain;
+            })(),
+        };
+        console.error('Bounded ChatSurface faulted:', error, '\n[fault context]:', faultContext);
         void offerChatVirtualizationRecovery(error);
     },
 });
@@ -10683,7 +10731,14 @@ export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTA
         });
     });
 
-    await Promise.all([savePromise, postSavePromise]);
+    // Fire-and-forget post-save so the UI does not block on IndexedDB writes.
+    // Snapshots are captured above, so chat switch safety is preserved.
+    postSavePromise.catch((error) => {
+        console.warn('[BYPASS-PERF-FIREFORGET] Background post-save failed:', error);
+    });
+
+    // [BYPASS-PERF-FIREFORGET-20260827] saveChat fire-and-forget：主线程不等 HTTP 写盘（94MB chat 全量重写阻塞 3~4.5 分钟）
+    fireAndForgetSaveChat(savePromise, commitReason);
 }
 
 /**
