@@ -647,6 +647,7 @@ function emitChatRecordSaveState() {
 }
 function trackChatRecordSave(run) {
     chatRecordSavePending += 1;
+    console.trace(`[RECORD-SAVE] #${chatRecordSavePending} enqueued`);
     emitChatRecordSaveState();
     const settle = () => {
         chatRecordSavePending = Math.max(0, chatRecordSavePending - 1);
@@ -8558,13 +8559,55 @@ export function flushDebouncedChatSave() {
  *
  * @returns {Promise<void>}
  */
+// [SAVE-DEDUP-20260829] 合并排队中尚未执行的相同保存（防元数据/变量风暴引发连发全量写盘）
+// 安全性：写盘任务执行时才读全局 chat 状态，先执行者写入的已是最新内容；
+// 挂靠仅发生在"先到者尚未开始执行"时（started 标志在任务闭包首行设置，与出队之间无间隙），
+// 已开始执行之后的新变化必然由新任务补写。chatData 显式快照保存不参与去重（写的是固定内容）。
+const pendingIdenticalSaves = new Map();
+
 export async function saveChat(...args) {
     if (selected_group) {
         toastr.error(t`Operation was aborted to prevent data corruption.`, t`saveChat called for a group chat`);
         throw new Error('saveChat called for a group chat');
     }
 
-    return trackChatRecordSave(() => enqueueChatSave(() => saveChatUnsafe(...args)));
+    const options = (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) ? args[0] : null;
+    let dedupKey = null;
+    if (options && options.chatData === undefined) {
+        dedupKey = JSON.stringify([
+            options.chatName ?? null,
+            options.mesId ?? null,
+            options.withMetadata ?? null,
+            options.force ?? false,
+            options.commitReason ?? null,
+        ]);
+    }
+
+    if (dedupKey !== null) {
+        const pending = pendingIdenticalSaves.get(dedupKey);
+        if (pending && !pending.started && pending.promise) {
+            console.debug('[SAVE-DEDUP] piggybacked on pending identical save');
+            return pending.promise;
+        }
+    }
+
+    const entry = { started: false, promise: null };
+    entry.promise = trackChatRecordSave(() => enqueueChatSave(async () => {
+        if (dedupKey !== null) {
+            entry.started = true;
+        }
+        try {
+            return await saveChatUnsafe(...args);
+        } finally {
+            if (dedupKey !== null) {
+                pendingIdenticalSaves.delete(dedupKey);
+            }
+        }
+    }));
+    if (dedupKey !== null) {
+        pendingIdenticalSaves.set(dedupKey, entry);
+    }
+    return entry.promise;
 }
 
 async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, chatData = undefined, commitReason = CHAT_COMMIT_REASON.MUTATION } = {}) {
