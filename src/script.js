@@ -637,6 +637,33 @@ export function enqueueChatSave(task) {
     chatSaveQueue = run.catch(() => {});
     return run;
 }
+
+// [RECORD-SAVE-SIGNAL-20260829] 聊天记录写盘精确计数（保存悬浮窗信号源）
+// 统计范围：聊天记录文件的写盘任务，入队即计（含排队等待/压缩），完成即减
+// 不含：IndexedDB post-save（token cache / itemized prompts）、设置与角色卡保存、聊天导入/删除/改名
+let chatRecordSavePending = 0;
+function emitChatRecordSaveState() {
+    try { window.dispatchEvent(new CustomEvent('tt-record-save', { detail: { pending: chatRecordSavePending } })); } catch (_) { /* noop */ }
+}
+function trackChatRecordSave(run) {
+    chatRecordSavePending += 1;
+    emitChatRecordSaveState();
+    const settle = () => {
+        chatRecordSavePending = Math.max(0, chatRecordSavePending - 1);
+        emitChatRecordSaveState();
+    };
+    let p;
+    try {
+        p = run();
+    } catch (error) {
+        settle();
+        throw error;
+    }
+    return p.finally(settle);
+}
+// 启动广播一次，让悬浮窗确认信号已接通（橙点→蓝点）
+emitChatRecordSaveState();
+
 let firstRun = false;
 export let settingsReady = false;
 let currentVersion = '0.0.0';
@@ -8537,7 +8564,7 @@ export async function saveChat(...args) {
         throw new Error('saveChat called for a group chat');
     }
 
-    return enqueueChatSave(() => saveChatUnsafe(...args));
+    return trackChatRecordSave(() => enqueueChatSave(() => saveChatUnsafe(...args)));
 }
 
 async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, chatData = undefined, commitReason = CHAT_COMMIT_REASON.MUTATION } = {}) {
