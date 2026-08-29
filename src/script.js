@@ -667,6 +667,8 @@ function trackChatRecordSave(run) {
 }
 // 启动广播一次，让悬浮窗确认信号已接通（橙点→蓝点）
 emitChatRecordSaveState();
+// [BUILD-TAG] 构建标记：确认当前运行的 script.js 版本
+console.info('[SCRIPT-BUILD] 20260829-stringifyyield');
 
 let firstRun = false;
 export let settingsReady = false;
@@ -8613,6 +8615,34 @@ export async function saveChat(...args) {
     return entry.promise;
 }
 
+// [SAVE-STRINGIFY-YIELD-20260829] 保存请求体逐条序列化并周期让出主线程（保守版优化）
+// 产出与 JSON.stringify({ch_name, file_name, chat: payload, avatar_url, force, commit_reason})
+// 完全等价的 JSON 文本，但 chat 数组逐条序列化，前台每 ~16ms 让出一次事件循环，
+// 安卓大聊天保存期间 UI 不再长时间冻结；后台页面不让出，避免定时器节流拖慢保存
+async function stringifyChatSaveBody(parts, payload) {
+    const envelope = JSON.stringify({
+        ch_name: parts.ch_name,
+        file_name: parts.file_name,
+        avatar_url: parts.avatar_url,
+        force: parts.force,
+        commit_reason: parts.commit_reason,
+    });
+    let body = envelope.slice(0, -1) + ',"chat":[';
+    let batchStart = performance.now();
+    const stringifyStart = batchStart;
+    let yieldCount = 0;
+    for (let index = 0; index < payload.length; index++) {
+        body += (index > 0 ? ',' : '') + JSON.stringify(payload[index]);
+        if (performance.now() - batchStart >= 16 && document.visibilityState === 'visible') {
+            yieldCount++;
+            await new Promise(resolve => setTimeout(resolve, 0));
+            batchStart = performance.now();
+        }
+    }
+    console.info(`[SAVE-STRINGIFY] chat=${payload.length}条 yields=${yieldCount} ${(performance.now() - stringifyStart).toFixed(0)}ms`);
+    return body + ']}';
+}
+
 async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, chatData = undefined, commitReason = CHAT_COMMIT_REASON.MUTATION } = {}) {
     if (arguments.length > 0 && typeof arguments[0] !== 'object') {
         console.trace('saveChat called with positional arguments. Please use an object instead.');
@@ -8650,18 +8680,18 @@ async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, ch
     const payload = [chatHeader, ...trimmedChat];
 
     try {
+        const saveChatRequestBody = await stringifyChatSaveBody({
+            ch_name: characters[this_chid].name,
+            file_name: fileName,
+            avatar_url: characters[this_chid].avatar,
+            force: force,
+            commit_reason: commitReason,
+        }, payload);
         const saveChatRequest = await compressRequest({
             method: 'POST',
             cache: 'no-cache',
             headers: getRequestHeaders(),
-            body: JSON.stringify({
-                ch_name: characters[this_chid].name,
-                file_name: fileName,
-                chat: payload,
-                avatar_url: characters[this_chid].avatar,
-                force: force,
-                commit_reason: commitReason,
-            }),
+            body: saveChatRequestBody,
         });
         const result = await fetch('/api/chats/save', saveChatRequest);
 
