@@ -647,7 +647,10 @@ function emitChatRecordSaveState() {
 }
 function trackChatRecordSave(run) {
     chatRecordSavePending += 1;
-    console.trace(`[RECORD-SAVE] #${chatRecordSavePending} enqueued`);
+    // console.trace 不在 frontend-log-capture 的转发列表里，安卓 logcat 收不到；用 info 携带调用栈
+    // new Error().stack 首行的 "Error" 会被日志面板误渲染成报错，去掉首行只保留 at 帧列表
+    const recordSaveStack = (new Error().stack ?? '').split('\n').slice(1).join('\n');
+    console.info(`[RECORD-SAVE] #${chatRecordSavePending} enqueued\n${recordSaveStack}`);
     emitChatRecordSaveState();
     const settle = () => {
         chatRecordSavePending = Math.max(0, chatRecordSavePending - 1);
