@@ -209,6 +209,7 @@ function serveReloadStream(request, response) {
 }
 
 function scheduleReload() {
+return;
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(() => {
         const payload = `event: reload\ndata: ${Date.now()}\n\n`;
