@@ -24,6 +24,9 @@
    @android.webkit.JavascriptInterface <methods>;
 }
 
+# tauri-plugin-notification: R8 无法从字节码解析 Kotlin Companion，显式豁免
+-dontwarn app.tauri.plugin.PluginManager$Companion
+
 # Uncomment this to preserve the line number information for
 # debugging stack traces.
 #-keepattributes SourceFile,LineNumberTable
