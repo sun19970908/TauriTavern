@@ -8615,6 +8615,83 @@ export async function saveChat(...args) {
     return entry.promise;
 }
 
+// [SAVE-CONTENT-DEDUP-20260902] 写盘内容去重（方案C：saveChatConditional 入口指纹）
+// 背景：MVU（MagVarUpdate）/LWB 等会在切聊天后 7~16 秒触发"幂等清理"型 saveMetadataDebounced，
+//       内容其实零变化，但每次都完整走一遍 jsonl 序列化 + IPC + 落盘（安卓端 = 闪存磨损 + 耗电）。
+// 做法：stringifyChatSaveBody 本来就要逐条 JSON.stringify(payload)，顺手在同一段循环里对 payload
+//       做 FNV-1a 双种子指纹 —— 真实写盘**零额外序列化成本**，只多一次字符串哈希扫描。
+// 安全性：指纹逐条覆盖 payload 全部字段（chatHeader + 每条消息），与实际发出的 body 一一对应，不存在漏字段。
+//         只对 commitReason === mutation 且非 force 生效；MAINTENANCE / PROVIDER_BARRIER / GENERATION_CHECKPOINT 一律放行。
+// 自愈：缓存按聊天定位符(name|file|avatar)分键。若磁盘被外部改动，重载后内存态与缓存指纹不同 → 正常写盘并刷新缓存。
+// 开关：localStorage.setItem('__TT_SAVE_CONTENT_DEDUP_OFF','1') 可随时关闭。
+function __fnv1a32(str, seed) {
+    let h = seed >>> 0;
+    for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h >>> 0;
+}
+const __SAVE_DEDUP_MAX_KEYS = 200;
+const __lastWrittenChatHash = new Map();  // locator -> 16 位十六进制指纹（只存指纹，不存内容，内存可忽略）
+
+function __hashChatPayloadItem(itemJson, hashPair) {
+    hashPair[0] = __fnv1a32(itemJson, hashPair[0]);
+    hashPair[1] = __fnv1a32(itemJson, hashPair[1]);
+    hashPair[0] = __fnv1a32('\u0000', hashPair[0]);
+    hashPair[1] = __fnv1a32('\u0000', hashPair[1]);
+}
+
+function __finishChatPayloadHash(hashPair, itemCount) {
+    const a = __fnv1a32(`#${itemCount}`, hashPair[0]);
+    const b = __fnv1a32(`#${itemCount}`, hashPair[1]);
+    return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+
+// [SAVE-HASH-PERSIST-20260902] 指纹跨会话持久化
+// 目的：开卡后"该会话的第一次保存"也能命中缓存 → 每会话每聊天 0 次写盘。
+// 原理：开卡时内存态必然 == 磁盘态（刚读出来），所以那次保存请求的内容与磁盘一致，本就该拦。
+//       之前拦不住只是因为内存缓存在应用重启后清空了，手上没有可比的基准。
+// 自愈：磁盘被外部改动 → 重载后内存态 == 新磁盘态 → 算出的指纹 ≠ 旧记录 → 正常写盘并刷新记录。
+// 开关：localStorage '__TT_SAVE_CONTENT_DEDUP_OFF' = '1' 关闭去重（同时停止持久化）。
+// 清空：localStorage.removeItem('__TT_SAVE_CONTENT_HASHES')
+const __SAVE_HASH_LS_KEY = '__TT_SAVE_CONTENT_HASHES';
+let __saveHashPersistTimer = null;
+
+function __isSaveDedupDisabled() {
+    try { return !!localStorage.getItem('__TT_SAVE_CONTENT_DEDUP_OFF'); } catch { return false; }
+}
+
+function __loadPersistedSaveHashes() {
+    try {
+        const raw = localStorage.getItem(__SAVE_HASH_LS_KEY);
+        if (!raw) return;
+        const obj = JSON.parse(raw);
+        if (!obj || typeof obj !== 'object') return;
+        for (const [k, v] of Object.entries(obj)) {
+            if (typeof k === 'string' && typeof v === 'string' && /^[0-9a-f]{16}$/.test(v)) {
+                __lastWrittenChatHash.set(k, v);
+            }
+        }
+    } catch { /* 损坏就当没有，首次照常写盘 */ }
+}
+
+function __persistSaveHashes() {
+    if (__isSaveDedupDisabled()) return;
+    if (__saveHashPersistTimer) clearTimeout(__saveHashPersistTimer);
+    __saveHashPersistTimer = setTimeout(() => {
+        __saveHashPersistTimer = null;
+        try {
+            const obj = {};
+            for (const [k, v] of __lastWrittenChatHash) obj[k] = v;
+            localStorage.setItem(__SAVE_HASH_LS_KEY, JSON.stringify(obj));
+        } catch { /* 配额满等情况忽略，不影响写盘 */ }
+    }, 2000);
+}
+
+// 模块加载时把上次的指纹读回内存，让"本会话第一次保存"就能命中去重
+__loadPersistedSaveHashes();
+
 // [SAVE-STRINGIFY-YIELD-20260829] 保存请求体逐条序列化并周期让出主线程（保守版优化）
 // 产出与 JSON.stringify({ch_name, file_name, chat: payload, avatar_url, force, commit_reason})
 // 完全等价的 JSON 文本，但 chat 数组逐条序列化，前台每 ~16ms 让出一次事件循环，
@@ -8631,16 +8708,20 @@ async function stringifyChatSaveBody(parts, payload) {
     let batchStart = performance.now();
     const stringifyStart = batchStart;
     let yieldCount = 0;
+    const hashPair = [0x811c9dc5, 0x01000193];
     for (let index = 0; index < payload.length; index++) {
-        body += (index > 0 ? ',' : '') + JSON.stringify(payload[index]);
+        const itemJson = JSON.stringify(payload[index]);
+        body += (index > 0 ? ',' : '') + itemJson;
+        __hashChatPayloadItem(itemJson, hashPair);
         if (performance.now() - batchStart >= 16 && document.visibilityState === 'visible') {
             yieldCount++;
             await new Promise(resolve => setTimeout(resolve, 0));
             batchStart = performance.now();
         }
     }
-    console.info(`[SAVE-STRINGIFY] chat=${payload.length}条 yields=${yieldCount} ${(performance.now() - stringifyStart).toFixed(0)}ms`);
-    return body + ']}';
+    const contentHash = __finishChatPayloadHash(hashPair, payload.length);
+    console.info(`[SAVE-STRINGIFY] chat=${payload.length}条 yields=${yieldCount} ${(performance.now() - stringifyStart).toFixed(0)}ms hash=${contentHash}`);
+    return { body: body + ']}', contentHash };
 }
 
 async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, chatData = undefined, commitReason = CHAT_COMMIT_REASON.MUTATION } = {}) {
@@ -8680,13 +8761,24 @@ async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, ch
     const payload = [chatHeader, ...trimmedChat];
 
     try {
-        const saveChatRequestBody = await stringifyChatSaveBody({
+        const { body: saveChatRequestBody, contentHash: saveContentHash } = await stringifyChatSaveBody({
             ch_name: characters[this_chid].name,
             file_name: fileName,
             avatar_url: characters[this_chid].avatar,
             force: force,
             commit_reason: commitReason,
         }, payload);
+
+        // [SAVE-CONTENT-DEDUP-20260902] 内容与上次成功写盘完全一致 → 跳过 IPC 与落盘
+        const __dedupKey = `${characters[this_chid]?.name ?? ''}|${fileName}|${characters[this_chid]?.avatar ?? ''}`;
+        const __dedupEligible = !force && commitReason === CHAT_COMMIT_REASON.MUTATION;
+        if (__dedupEligible && !__isSaveDedupDisabled()) {
+            const __prevHash = __lastWrittenChatHash.get(__dedupKey);
+            if (__prevHash !== undefined && __prevHash === saveContentHash) {
+                console.info(`[SAVE-DEDUP] 内容未变化，跳过写盘 chat=${fileName} hash=${saveContentHash}`);
+                return;
+            }
+        }
         const saveChatRequest = await compressRequest({
             method: 'POST',
             cache: 'no-cache',
@@ -8696,6 +8788,14 @@ async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, ch
         const result = await fetch('/api/chats/save', saveChatRequest);
 
         if (result.ok) {
+            if (__dedupEligible) {
+                if (__lastWrittenChatHash.size >= __SAVE_DEDUP_MAX_KEYS) {
+                    const oldest = __lastWrittenChatHash.keys().next().value;
+                    if (oldest !== undefined) __lastWrittenChatHash.delete(oldest);
+                }
+                __lastWrittenChatHash.set(__dedupKey, saveContentHash);
+                __persistSaveHashes();
+            }
             return;
         }
 
