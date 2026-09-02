@@ -592,6 +592,35 @@ function updateChatSaveBusyFlag() {
     isChatSaving = pendingChatSaveTasks > 0;
 }
 
+// [BYPASS-PERF-FIREFORGET-20260827] fire-and-forget 包装 saveChat
+// 主线程不等 HTTP 写盘（94MB chat 全量重写阻塞 3~4.5 分钟）
+// 成功/失败都通过 console.log 记录，不弹窗
+function fireAndForgetSaveChat(savePromise, commitReason) {
+    const t0 = performance.now();
+    savePromise.then(
+        () => {
+            console.log(`[BYPASS-PERF-FIREFORGET] saveChat(reason=${commitReason}) SUCCESS duration=${(performance.now() - t0).toFixed(1)}ms`);
+        },
+        (error) => {
+            console.error(`[BYPASS-PERF-FIREFORGET] saveChat(reason=${commitReason}) FAILED duration=${(performance.now() - t0).toFixed(1)}ms error=${error?.message || error}`, error);
+        },
+    );
+}
+
+// [MUTATION-ASYNC-TOGGLE-20260827] mutation 保存异步开关
+// 状态由酒馆助手脚本（QR 按钮 / parent.window.__mutationAsyncToggle）写入
+// extension_settings.tavernHelperToggle.mutationAsync：
+//   true  = 异步：saveChat / post-save 均 fire-and-forget，主线程不被 IndexedDB/HTTP 写盘阻塞
+//   false（默认）= 同步：恢复原始行为，等待 chat 文件 + token/itemized 全部写盘完成
+export function isMutationAsyncEnabled() {
+    try {
+        const v = extension_settings?.tavernHelperToggle?.mutationAsync;
+        return v === undefined ? false : v === true;
+    } catch {
+        return false;
+    }
+}
+
 /**
  * Serialize all chat save operations (core + extensions) so older snapshots
  * cannot finish after and overwrite newer snapshots.
@@ -621,6 +650,39 @@ export function enqueueChatSave(task) {
     chatSaveQueue = run.catch(() => {});
     return run;
 }
+
+// [RECORD-SAVE-SIGNAL-20260829] 聊天记录写盘精确计数（保存悬浮窗信号源）
+// 统计范围：聊天记录文件的写盘任务，入队即计（含排队等待/压缩），完成即减
+// 不含：IndexedDB post-save（token cache / itemized prompts）、设置与角色卡保存、聊天导入/删除/改名
+let chatRecordSavePending = 0;
+function emitChatRecordSaveState() {
+    try { window.dispatchEvent(new CustomEvent('tt-record-save', { detail: { pending: chatRecordSavePending } })); } catch (_) { /* noop */ }
+}
+function trackChatRecordSave(run) {
+    chatRecordSavePending += 1;
+    // console.trace 不在 frontend-log-capture 的转发列表里，安卓 logcat 收不到；用 info 携带调用栈
+    // new Error().stack 首行的 "Error" 会被日志面板误渲染成报错，去掉首行只保留 at 帧列表
+    const recordSaveStack = (new Error().stack ?? '').split('\n').slice(1).join('\n');
+    console.info(`[RECORD-SAVE] #${chatRecordSavePending} enqueued\n${recordSaveStack}`);
+    emitChatRecordSaveState();
+    const settle = () => {
+        chatRecordSavePending = Math.max(0, chatRecordSavePending - 1);
+        emitChatRecordSaveState();
+    };
+    let p;
+    try {
+        p = run();
+    } catch (error) {
+        settle();
+        throw error;
+    }
+    return p.finally(settle);
+}
+// 启动广播一次，让悬浮窗确认信号已接通（橙点→蓝点）
+emitChatRecordSaveState();
+// [BUILD-TAG] 构建标记：确认当前运行的 script.js 版本
+console.info('[SCRIPT-BUILD] 20260829-stringifyyield');
+
 let firstRun = false;
 export let settingsReady = false;
 let currentVersion = '0.0.0';
@@ -8781,13 +8843,164 @@ export function flushDebouncedChatSave() {
  *
  * @returns {Promise<void>}
  */
+// [SAVE-DEDUP-20260829] 合并排队中尚未执行的相同保存（防元数据/变量风暴引发连发全量写盘）
+// 安全性：写盘任务执行时才读全局 chat 状态，先执行者写入的已是最新内容；
+// 挂靠仅发生在"先到者尚未开始执行"时（started 标志在任务闭包首行设置，与出队之间无间隙），
+// 已开始执行之后的新变化必然由新任务补写。chatData 显式快照保存不参与去重（写的是固定内容）。
+const pendingIdenticalSaves = new Map();
+
 export async function saveChat(...args) {
     if (selected_group) {
         toastr.error(t`Operation was aborted to prevent data corruption.`, t`saveChat called for a group chat`);
         throw new Error('saveChat called for a group chat');
     }
 
-    return enqueueChatSave(() => saveChatUnsafe(...args));
+    const options = (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) ? args[0] : null;
+    let dedupKey = null;
+    if (options && options.chatData === undefined) {
+        dedupKey = JSON.stringify([
+            options.chatName ?? null,
+            options.mesId ?? null,
+            options.withMetadata ?? null,
+            options.force ?? false,
+            options.commitReason ?? null,
+        ]);
+    }
+
+    if (dedupKey !== null) {
+        const pending = pendingIdenticalSaves.get(dedupKey);
+        if (pending && !pending.started && pending.promise) {
+            console.debug('[SAVE-DEDUP] piggybacked on pending identical save');
+            return pending.promise;
+        }
+    }
+
+    const entry = { started: false, promise: null };
+    entry.promise = trackChatRecordSave(() => enqueueChatSave(async () => {
+        if (dedupKey !== null) {
+            entry.started = true;
+        }
+        try {
+            return await saveChatUnsafe(...args);
+        } finally {
+            if (dedupKey !== null) {
+                pendingIdenticalSaves.delete(dedupKey);
+            }
+        }
+    }));
+    if (dedupKey !== null) {
+        pendingIdenticalSaves.set(dedupKey, entry);
+    }
+    return entry.promise;
+}
+
+// [SAVE-CONTENT-DEDUP-20260902] 写盘内容去重（方案C：saveChatConditional 入口指纹）
+// 背景：MVU（MagVarUpdate）/LWB 等会在切聊天后 7~16 秒触发"幂等清理"型 saveMetadataDebounced，
+//       内容其实零变化，但每次都完整走一遍 jsonl 序列化 + IPC + 落盘（安卓端 = 闪存磨损 + 耗电）。
+// 做法：stringifyChatSaveBody 本来就要逐条 JSON.stringify(payload)，顺手在同一段循环里对 payload
+//       做 FNV-1a 双种子指纹 —— 真实写盘**零额外序列化成本**，只多一次字符串哈希扫描。
+// 安全性：指纹逐条覆盖 payload 全部字段（chatHeader + 每条消息），与实际发出的 body 一一对应，不存在漏字段。
+//         只对 commitReason === mutation 且非 force 生效；MAINTENANCE / PROVIDER_BARRIER / GENERATION_CHECKPOINT 一律放行。
+// 自愈：缓存按聊天定位符(name|file|avatar)分键。若磁盘被外部改动，重载后内存态与缓存指纹不同 → 正常写盘并刷新缓存。
+// 开关：localStorage.setItem('__TT_SAVE_CONTENT_DEDUP_OFF','1') 可随时关闭。
+function __fnv1a32(str, seed) {
+    let h = seed >>> 0;
+    for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h >>> 0;
+}
+const __SAVE_DEDUP_MAX_KEYS = 200;
+const __lastWrittenChatHash = new Map();  // locator -> 16 位十六进制指纹（只存指纹，不存内容，内存可忽略）
+
+function __hashChatPayloadItem(itemJson, hashPair) {
+    hashPair[0] = __fnv1a32(itemJson, hashPair[0]);
+    hashPair[1] = __fnv1a32(itemJson, hashPair[1]);
+    hashPair[0] = __fnv1a32('\u0000', hashPair[0]);
+    hashPair[1] = __fnv1a32('\u0000', hashPair[1]);
+}
+
+function __finishChatPayloadHash(hashPair, itemCount) {
+    const a = __fnv1a32(`#${itemCount}`, hashPair[0]);
+    const b = __fnv1a32(`#${itemCount}`, hashPair[1]);
+    return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+
+// [SAVE-HASH-PERSIST-20260902] 指纹跨会话持久化
+// 目的：开卡后"该会话的第一次保存"也能命中缓存 → 每会话每聊天 0 次写盘。
+// 原理：开卡时内存态必然 == 磁盘态（刚读出来），所以那次保存请求的内容与磁盘一致，本就该拦。
+//       之前拦不住只是因为内存缓存在应用重启后清空了，手上没有可比的基准。
+// 自愈：磁盘被外部改动 → 重载后内存态 == 新磁盘态 → 算出的指纹 ≠ 旧记录 → 正常写盘并刷新记录。
+// 开关：localStorage '__TT_SAVE_CONTENT_DEDUP_OFF' = '1' 关闭去重（同时停止持久化）。
+// 清空：localStorage.removeItem('__TT_SAVE_CONTENT_HASHES')
+const __SAVE_HASH_LS_KEY = '__TT_SAVE_CONTENT_HASHES';
+let __saveHashPersistTimer = null;
+
+function __isSaveDedupDisabled() {
+    try { return !!localStorage.getItem('__TT_SAVE_CONTENT_DEDUP_OFF'); } catch { return false; }
+}
+
+function __loadPersistedSaveHashes() {
+    try {
+        const raw = localStorage.getItem(__SAVE_HASH_LS_KEY);
+        if (!raw) return;
+        const obj = JSON.parse(raw);
+        if (!obj || typeof obj !== 'object') return;
+        for (const [k, v] of Object.entries(obj)) {
+            if (typeof k === 'string' && typeof v === 'string' && /^[0-9a-f]{16}$/.test(v)) {
+                __lastWrittenChatHash.set(k, v);
+            }
+        }
+    } catch { /* 损坏就当没有，首次照常写盘 */ }
+}
+
+function __persistSaveHashes() {
+    if (__isSaveDedupDisabled()) return;
+    if (__saveHashPersistTimer) clearTimeout(__saveHashPersistTimer);
+    __saveHashPersistTimer = setTimeout(() => {
+        __saveHashPersistTimer = null;
+        try {
+            const obj = {};
+            for (const [k, v] of __lastWrittenChatHash) obj[k] = v;
+            localStorage.setItem(__SAVE_HASH_LS_KEY, JSON.stringify(obj));
+        } catch { /* 配额满等情况忽略，不影响写盘 */ }
+    }, 2000);
+}
+
+// 模块加载时把上次的指纹读回内存，让"本会话第一次保存"就能命中去重
+__loadPersistedSaveHashes();
+
+// [SAVE-STRINGIFY-YIELD-20260829] 保存请求体逐条序列化并周期让出主线程（保守版优化）
+// 产出与 JSON.stringify({ch_name, file_name, chat: payload, avatar_url, force, commit_reason})
+// 完全等价的 JSON 文本，但 chat 数组逐条序列化，前台每 ~16ms 让出一次事件循环，
+// 安卓大聊天保存期间 UI 不再长时间冻结；后台页面不让出，避免定时器节流拖慢保存
+async function stringifyChatSaveBody(parts, payload) {
+    const envelope = JSON.stringify({
+        ch_name: parts.ch_name,
+        file_name: parts.file_name,
+        avatar_url: parts.avatar_url,
+        force: parts.force,
+        commit_reason: parts.commit_reason,
+    });
+    let body = envelope.slice(0, -1) + ',"chat":[';
+    let batchStart = performance.now();
+    const stringifyStart = batchStart;
+    let yieldCount = 0;
+    const hashPair = [0x811c9dc5, 0x01000193];
+    for (let index = 0; index < payload.length; index++) {
+        const itemJson = JSON.stringify(payload[index]);
+        body += (index > 0 ? ',' : '') + itemJson;
+        __hashChatPayloadItem(itemJson, hashPair);
+        if (performance.now() - batchStart >= 16 && document.visibilityState === 'visible') {
+            yieldCount++;
+            await new Promise(resolve => setTimeout(resolve, 0));
+            batchStart = performance.now();
+        }
+    }
+    const contentHash = __finishChatPayloadHash(hashPair, payload.length);
+    console.info(`[SAVE-STRINGIFY] chat=${payload.length}条 yields=${yieldCount} ${(performance.now() - stringifyStart).toFixed(0)}ms hash=${contentHash}`);
+    return { body: body + ']}', contentHash };
 }
 
 async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, chatData = undefined, commitReason = CHAT_COMMIT_REASON.MUTATION } = {}) {
@@ -8827,22 +9040,41 @@ async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, ch
     const payload = [chatHeader, ...trimmedChat];
 
     try {
+        const { body: saveChatRequestBody, contentHash: saveContentHash } = await stringifyChatSaveBody({
+            ch_name: characters[this_chid].name,
+            file_name: fileName,
+            avatar_url: characters[this_chid].avatar,
+            force: force,
+            commit_reason: commitReason,
+        }, payload);
+
+        // [SAVE-CONTENT-DEDUP-20260902] 内容与上次成功写盘完全一致 → 跳过 IPC 与落盘
+        const __dedupKey = `${characters[this_chid]?.name ?? ''}|${fileName}|${characters[this_chid]?.avatar ?? ''}`;
+        const __dedupEligible = !force && commitReason === CHAT_COMMIT_REASON.MUTATION;
+        if (__dedupEligible && !__isSaveDedupDisabled()) {
+            const __prevHash = __lastWrittenChatHash.get(__dedupKey);
+            if (__prevHash !== undefined && __prevHash === saveContentHash) {
+                console.info(`[SAVE-DEDUP] 内容未变化，跳过写盘 chat=${fileName} hash=${saveContentHash}`);
+                return;
+            }
+        }
         const saveChatRequest = await compressRequest({
             method: 'POST',
             cache: 'no-cache',
             headers: getRequestHeaders(),
-            body: JSON.stringify({
-                ch_name: characters[this_chid].name,
-                file_name: fileName,
-                chat: payload,
-                avatar_url: characters[this_chid].avatar,
-                force: force,
-                commit_reason: commitReason,
-            }),
+            body: saveChatRequestBody,
         });
         const result = await fetch('/api/chats/save', saveChatRequest);
 
         if (result.ok) {
+            if (__dedupEligible) {
+                if (__lastWrittenChatHash.size >= __SAVE_DEDUP_MAX_KEYS) {
+                    const oldest = __lastWrittenChatHash.keys().next().value;
+                    if (oldest !== undefined) __lastWrittenChatHash.delete(oldest);
+                }
+                __lastWrittenChatHash.set(__dedupKey, saveContentHash);
+                __persistSaveHashes();
+            }
             return;
         }
 
@@ -11007,7 +11239,21 @@ export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTA
         });
     });
 
-    await Promise.all([savePromise, postSavePromise]);
+    // [MUTATION-ASYNC-TOGGLE-20260827] 异步开关：由酒馆助手脚本 QR 按钮切换，运行时生效、无需重启。
+    // 状态存 extension_settings.tavernHelperToggle.mutationAsync，默认关（同步）。
+    if (isMutationAsyncEnabled()) {
+        // Fire-and-forget post-save so the UI does not block on IndexedDB writes.
+        // Snapshots are captured above, so chat switch safety is preserved.
+        postSavePromise.catch((error) => {
+            console.warn('[BYPASS-PERF-FIREFORGET] Background post-save failed:', error);
+        });
+
+        // saveChat fire-and-forget：主线程不等 HTTP 写盘（94MB chat 全量重写阻塞 3~4.5 分钟）
+        fireAndForgetSaveChat(savePromise, commitReason);
+    } else {
+        // 同步模式（默认）：恢复原始行为，等 chat 文件 + token/itemized 都写盘完成再返回
+        await Promise.all([savePromise, postSavePromise]);
+    }
 }
 
 /**
