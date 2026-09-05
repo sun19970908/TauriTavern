@@ -15,6 +15,16 @@ const theme = EditorView.theme({
         lineHeight: 'inherit',
         overflow: 'auto',
     },
+    // CodeMirror's base theme hardcodes a light-mode selection (lavender #d7d4f0
+    // when focused, #d9d9d9 otherwise), which is unreadable under light text.
+    // Tint the selection with the body color instead so it stays readable on
+    // both dark and light themes.
+    '& .cm-selectionLayer .cm-selectionBackground': {
+        backgroundColor: 'color-mix(in srgb, var(--SmartThemeBodyColor) 30%, transparent)',
+    },
+    '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
+        backgroundColor: 'color-mix(in srgb, var(--SmartThemeBodyColor) 30%, transparent)',
+    },
 });
 
 export function createCodeMirrorView(parent, { doc, readOnly, ariaLabel, onChange }) {
