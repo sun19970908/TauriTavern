@@ -3689,7 +3689,11 @@ export async function getWorldEntry(name, data, entry) {
             clearTimeout(drawerDestroyTimeout);
             drawerDestroyTimeout = null;
         }
-        const open = event.originalEvent?.detail?.open ?? editOutlet.is(':visible');
+        // Synthetic triggers without detail.open (extensions that take over entry
+        // expansion) fire before they make the outlet visible, so an empty outlet
+        // must be treated as an expand request.
+        const open = event.originalEvent?.detail?.open
+            ?? (editOutlet.children().length === 0 || editOutlet.is(':visible'));
         if (!open) {
             commitContent();
             drawerDestroyTimeout = setTimeout(() => {
