@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-use serde_json::Value;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use super::super::common::{
     ensure_only_args, object_args, required_trimmed_string_arg, tool_error,
@@ -177,6 +176,7 @@ pub(in crate::services::agent_tools) async fn script(
 
     let outcome = engine
         .execute(SkillScriptRequest {
+            frozen_macros: session.frozen_macros.clone(),
             entry_module: entry_module.clone(),
             modules,
             args: script_args,
@@ -488,8 +488,15 @@ fn build_script_context_json(prompt_snapshot: &Value) -> Result<Value, Applicati
         .map(|(index, entry)| super::super::world_info::normalize_entry_json(index, entry))
         .collect::<Result<Vec<_>, ApplicationError>>()?;
 
-    let variables = prompt_snapshot
+    let frozen = prompt_snapshot
         .get("frozenRunInputSnapshot")
+        .map(|value| {
+            value
+                .as_object()
+                .ok_or_else(|| invalid_script_context("frozenRunInputSnapshot must be an object"))
+        })
+        .transpose()?;
+    let variables = frozen
         .and_then(|frozen| frozen.get("variables"))
         .map(|variables| {
             let variables = variables
@@ -508,9 +515,21 @@ fn build_script_context_json(prompt_snapshot: &Value) -> Result<Value, Applicati
         .transpose()?
         .unwrap_or_else(|| json!({ "local": {}, "global": {} }));
 
+    let empty_macro_context = Map::new();
+    let macro_context = frozen
+        .and_then(|frozen| frozen.get("macroContext"))
+        .map(|value| {
+            value
+                .as_object()
+                .ok_or_else(|| invalid_script_context("macroContext must be an object"))
+        })
+        .transpose()?
+        .unwrap_or(&empty_macro_context);
+
     Ok(json!({
         "worldInfo": { "entries": world_info_entries },
         "variables": variables,
+        "macro": macro_context,
     }))
 }
 

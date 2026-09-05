@@ -9,7 +9,9 @@ use super::commit_ledger::RunCommitLedger;
 use super::error_payload::{run_failure_payload, run_partial_success_payload};
 use super::invocation::model_session_id;
 use super::loop_runner::AgentLoopExit;
-use super::prompt_snapshot::{prepare_agent_tool_request, request_summary};
+use super::prompt_snapshot::{
+    frozen_macros_from_snapshot, prepare_agent_tool_request, request_summary,
+};
 use super::tool_snapshot::tool_snapshot_summary;
 use super::{AgentCancelReceiver, AgentRuntimeService, PreparedInvocation};
 use crate::dto::chat_completion_dto::ChatCompletionGenerateRequestDto;
@@ -296,6 +298,7 @@ impl AgentRuntimeService {
             request,
             &visible_tools,
             tool_turn.choice().clone(),
+            &run.stable_chat_id,
             run_id,
             root_invocation.id.as_str(),
         )?;
@@ -325,6 +328,7 @@ impl AgentRuntimeService {
 
         self.execute_active_invocation_chain(
             PreparedInvocation {
+                frozen_macros: frozen_macros_from_snapshot(&prompt_snapshot)?,
                 invocation: root_invocation,
                 delegation_task_id: None,
                 profile: resolved_profile,

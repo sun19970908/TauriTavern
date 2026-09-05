@@ -61,7 +61,8 @@ import { context, workspace, log } from '@tauritavern/runtime';
 | 导出 | 读写 | 说明 |
 | --- | --- | --- |
 | `workspace` | 读写 | 受沙箱策略门控的文件 API |
-| `context` | 只读 | 与宿主状态隔离的 `worldInfo` + `variables` 快照 |
+| `context` | 只读 | 与宿主状态隔离的 `worldInfo` + `variables` + `macro` 快照 |
+| `macros` | 只读 | `render(text)` 使用冻结值展开宏 |
 | `log` | 只写 | 经宿主 tracing 输出的日志 API |
 
 除此之外**没有** `process`、`Buffer`、`fs`、`http`、`crypto`、`setTimeout`、`setInterval` 等 Node 或浏览器 API。
@@ -142,7 +143,50 @@ const theme = context.variables.global.theme;
 
 变量不存在时得到标准 JavaScript `undefined`，可按需使用 `??` 提供默认值。修改这份对象只影响本次脚本执行，不会写回 SillyTavern。
 
-### 3.4 `log` — 日志 API
+### 3.4 `context.macro` — 宏上下文快照（只读）
+
+`context.macro` 提供本次 run 启动时冻结的前端宏数据，保留原始 JSON 类型。修改这份对象只影响本次脚本执行，不会写回宿主。
+
+```js
+import { context } from '@tauritavern/runtime';
+
+const charName = context.macro.names?.char;
+const description = context.macro.character?.description;
+const lastMessageId = context.macro.chat?.lastMessageId;
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `schemaVersion` | 宏上下文版本号 |
+| `names` | user、char、group 等名称 |
+| `character` | description、scenario、firstMessage 等角色字段；personaPosition 为数值，alternateGreetings 为字符串数组 |
+| `system.model` | 前端捕获时使用的模型 |
+| `chat.lastMessageId` | 最后一条合格消息的 0-based 索引，跳过正在生成新 swipe 的消息 |
+| `chat.lastSwipeId` | 末尾消息已有的 swipe 数量 |
+| `chat.currentSwipeId` | 末尾消息的 1-based swipe 编号，包含正在生成的新 swipe |
+| `builtins` | 捕获时的时间、聊天、输入、Token 上限与提示词模板文本 |
+| `variableValues.local` / `variableValues.global` | 按前端变量读取规则转换后的宏文本；原始值仍在 `context.variables` |
+
+三个 `chat` 值均为字符串，不可用时为 `""`；生成新 swipe 时，它们可能指向不同消息。缺少宏快照时 `context.macro` 为 `{}`，字段可用可选链读取。
+
+### 3.5 `macros.render(text)` — 冻结宏重放
+
+```js
+import { macros, workspace } from '@tauritavern/runtime';
+const text = macros.render(workspace.readText('output/template.md'));
+```
+
+返回展开后的字符串。除名称、角色／Persona 字段、模型与聊天位置外，还支持：
+
+- 时间与状态：`time`、`date`、`weekday`、`isotime`、`isodate`、`idleDuration` / `idle_duration`、`input`、`isMobile`、`lastGenerationType`、`maxPrompt` / `maxContext` / `maxResponse` 及其 `Tokens` 别名，均使用捕获时的值。
+- 聊天：`lastMessage`、`lastUserMessage`、`lastCharMessage`、`firstIncludedMessageId`、`firstDisplayedMessageId`、`allChatRange`。
+- 提示词：内置 `instruct*` 序列及别名、`systemPrompt`、`defaultSystemPrompt`、`exampleSeparator` / `chatSeparator`、`chatStart`、`reasoningPrefix` / `reasoningSuffix` / `reasoningSeparator`。
+- 固定文本：无参数 `space`、`newline`、`noop`。
+- 单层参数查询：`{{greeting::1}}`（0 为主开场白，1 起为备选；也支持 `charFirstMessage`）、`{{getvar::Name}}` / `{{getglobalvar::Name}}`、`{{hasvar::Name}}` / `{{hasglobalvar::Name}}`（别名 `varexists` / `globalvarexists`），以及 `{{outlet::key}}`。
+
+宏名不区分大小写，变量名和 outlet key 区分大小写。参数使用 `::` 加字面量；已捕获的查询集合中，缺失项或越界 greeting 返回空字符串，存在性查询返回 `true` / `false`。替换值不再递归展开；未知、嵌套或不支持的语法保持原文，`\{{char}}` 保留字面量 `{{char}}`。扩展注册宏与变量写入宏不参与重放。单次展开上限与脚本工作区输出上限相同。
+
+### 3.6 `log` — 日志 API
 
 `log` 将日志输出到宿主的日志系统，供开发者调试。日志不会进入 Agent 上下文或聊天消息。
 
@@ -347,7 +391,7 @@ export default function (args) {
 | 导入 `@tauritavern/kit/*` 工具箱模块 | 是（内存加载） |
 | 导入快照外 / scripts/ 外的模块 | 否（fail-fast） |
 | 网络请求 | 否 |
-| 修改宿主变量 / 世界书 | 否；`context` 只是本次执行的副本 |
+| 修改宿主变量 / 世界书 / 宏上下文 | 否；`context` 只是本次执行的副本 |
 | 访问 Node / 浏览器内置对象 | 否 |
 | 访问进程 / shell | 否 |
 
@@ -469,6 +513,6 @@ Processes input text with configurable format and batch size.
 1. 使用 ES module，并导出 `default(args)` 或 `main(args)`。
 2. 返回 JSON 可序列化的小结果；大内容写入 workspace。
 3. workspace 路径使用当前 policy 允许的相对路径。
-4. `context` 是隔离快照，不会把修改写回宿主。
+4. `context` 是隔离快照（`worldInfo` / `variables` / `macro`），不会把修改写回宿主。
 5. 优先使用 `@tauritavern/kit/*`；其他依赖随 Skill 打包，且不能依赖 Node、浏览器或网络 API。
 6. 在 `SKILL.md` 中写清脚本参数、返回值和文件副作用。
