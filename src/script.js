@@ -12245,7 +12245,7 @@ export async function processDroppedFiles(files, data = new Map(), { replacement
 
         for (const avatarFileName of replacements) {
             try {
-                await resolveImportedCharacterLorebookConflict(avatarFileName);
+                await resolveCharacterLorebookConflict(avatarFileName);
             } catch (error) {
                 console.warn('Character replaced, but its World/Lorebook conflict could not be resolved:', error);
                 toastr.warning(error?.message, t`Character replaced; World/Lorebook follow-up failed`);
@@ -12540,11 +12540,14 @@ async function applyCharacterLorebookConflictResolution(avatarFileName, resoluti
     }
 }
 
-async function resolveImportedCharacterLorebookConflict(avatarFileName) {
+/**
+ * @returns {Promise<boolean>} Whether the conflict is resolved; false when deferred.
+ */
+async function resolveCharacterLorebookConflict(avatarFileName) {
     while (true) {
         const conflict = await getCharacterLorebookConflict(avatarFileName);
         if (!conflict?.conflict) {
-            return;
+            return true;
         }
 
         const conflictToken = String(conflict.conflict_token || '');
@@ -12554,44 +12557,39 @@ async function resolveImportedCharacterLorebookConflict(avatarFileName) {
         const currentWorldLabel = worldName
             ? `<code>${escapeHtml(worldName)}</code>`
             : `<code>${t`missing`}</code>`;
-        const unavailableMessage = currentAvailable
-            ? ''
-            : `<div>${t`The current local World/Lorebook is missing. Saving a copy will not bind it automatically.`}</div>`;
-        const keepCurrentMessage = currentAvailable
-            ? `<div>${t`Keeping the current version replaces the card's embedded copy with the local version.`}</div>`
-            : '';
+        const resolutionMessage = currentAvailable
+            ? `<div>${t`Using the embedded version overwrites the local World/Lorebook and may affect other characters.`}</div>
+               <div>${t`Saving a copy keeps the current link and stores the embedded version separately.`}</div>
+               <div>${t`Keeping the current version replaces the card's embedded copy with the local version.`}</div>`
+            : `<div>${t`The linked local World/Lorebook is missing. Use the embedded version to restore it, or save an unbound copy.`}</div>`;
         const popupBody = `
             <div>${t`The card's embedded World/Lorebook differs from the linked local version.`}</div>
             <div class="m-t-1">${t`Current local World/Lorebook:`} ${currentWorldLabel}</div>
             <div>${t`Embedded World/Lorebook:`} <code>${escapeHtml(embeddedName)}</code></div>
-            <div class="m-t-1">${t`Using the new version overwrites the local World/Lorebook and may affect other characters.`}</div>
-            <div>${t`Saving a copy keeps the current link and stores the new version separately.`}</div>
-            ${keepCurrentMessage}
-            ${unavailableMessage}
+            <div class="m-t-1">${resolutionMessage}</div>
         `;
         const customButtons = [
             {
-                text: t`Use New`,
+                text: t`Use Embedded`,
                 result: POPUP_RESULT.CUSTOM1,
             },
             {
-                text: t`Keep Both`,
+                text: currentAvailable ? t`Keep Both` : t`Save a Copy`,
                 result: POPUP_RESULT.CUSTOM2,
             },
         ];
         if (currentAvailable) {
             customButtons.push({
-                text: t`Keep Current`,
+                text: t`Keep Local`,
                 result: POPUP_RESULT.CUSTOM3,
             });
         }
 
         const result = await Popup.show.confirm(t`World/Lorebook conflict`, popupBody, {
             okButton: false,
-            cancelButton: false,
+            cancelButton: t`Not Now`,
             customButtons,
             defaultResult: currentAvailable ? POPUP_RESULT.CUSTOM2 : POPUP_RESULT.CUSTOM1,
-            allowEscapeClose: false,
         });
         const resolution = {
             [POPUP_RESULT.CUSTOM1]: 'embedded',
@@ -12599,7 +12597,7 @@ async function resolveImportedCharacterLorebookConflict(avatarFileName) {
             [POPUP_RESULT.CUSTOM3]: 'current',
         }[result];
         if (!resolution) {
-            throw new Error(t`World/Lorebook choice was cancelled.`);
+            return false;
         }
 
         try {
@@ -12608,7 +12606,7 @@ async function resolveImportedCharacterLorebookConflict(avatarFileName) {
                 resolution,
                 conflictToken,
             );
-            return;
+            return true;
         } catch (error) {
             if (error?.status === 409) {
                 continue;
@@ -12630,81 +12628,7 @@ async function resolveCharacterLorebookConflictBeforeNewChat() {
 
     try {
         await flushWorldInfoSaves('new_chat_lorebook_conflict_check');
-        while (true) {
-            const conflict = await getCharacterLorebookConflict(character.avatar);
-
-            if (!conflict?.conflict) {
-                return true;
-            }
-
-            const conflictToken = String(conflict.conflict_token || '');
-            const worldName = String(conflict.world || character?.data?.extensions?.world || '');
-            const embeddedName = String(conflict.embedded_name || t`Embedded World/Lorebook`);
-            const currentAvailable = Boolean(conflict.current_available);
-            const currentWorldLabel = worldName ? `<code>${escapeHtml(worldName)}</code>` : `<code>${t`missing`}</code>`;
-            const embeddedWorldLabel = `<code>${escapeHtml(embeddedName)}</code>`;
-            const unavailableMessage = currentAvailable
-                ? ''
-                : `<div class="m-t-1">${t`The linked local World/Lorebook file is missing. You can restore it from the embedded copy or cancel.`}</div>`;
-
-            const popupBody = `
-                <div>${t`The embedded World/Lorebook and linked local World/Lorebook are different.`}</div>
-                <div class="m-t-1">${t`Current local World/Lorebook:`} ${currentWorldLabel}</div>
-                <div>${t`Embedded World/Lorebook:`} ${embeddedWorldLabel}</div>
-                ${unavailableMessage}
-                <div class="m-t-1">${t`Choose which version to keep before starting a new chat. The other version will be overwritten.`}</div>
-            `;
-            const customButtons = [];
-
-            if (currentAvailable) {
-                customButtons.push({
-                    text: t`Save current World/Lorebook`,
-                    result: POPUP_RESULT.CUSTOM1,
-                });
-            }
-
-            customButtons.push(
-                {
-                    text: t`Overwrite with embedded World/Lorebook`,
-                    result: POPUP_RESULT.CUSTOM2,
-                },
-                {
-                    text: translate('Cancel', 'Cancel World/Lorebook conflict'),
-                    result: POPUP_RESULT.NEGATIVE,
-                },
-            );
-
-            const result = await Popup.show.confirm(t`World/Lorebook conflict`, popupBody, {
-                okButton: false,
-                cancelButton: false,
-                customButtons,
-                defaultResult: currentAvailable ? POPUP_RESULT.CUSTOM1 : POPUP_RESULT.CUSTOM2,
-            });
-
-            const resolution = result === POPUP_RESULT.CUSTOM1
-                ? 'current'
-                : result === POPUP_RESULT.CUSTOM2
-                    ? 'embedded'
-                    : '';
-
-            if (!resolution) {
-                return false;
-            }
-
-            try {
-                await applyCharacterLorebookConflictResolution(
-                    character.avatar,
-                    resolution,
-                    conflictToken,
-                );
-                return true;
-            } catch (error) {
-                if (error?.status === 409) {
-                    continue;
-                }
-                throw error;
-            }
-        }
+        return await resolveCharacterLorebookConflict(character.avatar);
     } catch (error) {
         console.error('Failed to resolve character lorebook conflict before new chat.', error);
         toastr.error(error?.message || t`Failed to resolve the World/Lorebook conflict.`, t`New chat cancelled`);
