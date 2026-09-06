@@ -217,7 +217,8 @@
 
 - `window.__TAURITAVERN__.api.chatSurface`
   - 当前是实验性的 Project Contract，尚未作为 Public Contract 稳定发布。
-  - 只暴露 `protocolVersion: 1`、`isManagedOwnershipRequired()` 与 `registerParticipant()`；ownership query 返回本页已冻结的布尔决策，投影控制器、DOM adapter、内部 revision、admission 预算和虚拟滚动引擎均不外露。
+  - 暴露 `protocolVersion: 1`、`isManagedOwnershipRequired()`、`registerParticipant()` 与独立的 `registerContentProcessor()`；ownership query 返回本页已冻结的布尔决策，投影控制器、DOM adapter、内部 revision、admission 预算和虚拟滚动引擎均不外露。
+  - 内容处理器在首次投影前注册，异步返回显示 HTML；宿主保存结果供重挂载复用，`registration.refresh()` 显式刷新。participant v1 的同步契约保持不变。
   - participant 必须显式声明协议版本；hook 返回同步 disposer，宿主用 `AbortSignal` 表达 mount/content/runtime 三种真实寿命。
   - mount/remount/content lifecycle 不得伪装为 SillyTavern 消息业务事件。
   - 完整协议与 raw API 接入示例见 `docs/API/ChatSurface.md`。

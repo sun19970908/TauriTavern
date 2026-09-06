@@ -118,6 +118,10 @@ function createFakeStreamingCommitScript() {
         updateMessageBlock(messageId, message, options) {
             renders.push({ messageId, text: message.mes, options });
         },
+        async finalizeMessageContent(messageId, event, ...args) {
+            script.updateMessageBlock(messageId, script.chat[messageId], { transient: false });
+            if (event) await script.eventSource.emit(event, messageId, ...args);
+        },
     };
     return { script, saveCalls, renders, events };
 }
@@ -562,7 +566,8 @@ test('agent live write keeps one real partial chat message and saves it on failu
         await waitFor(() => persistCount === 1);
         assert.equal(cancelledFrames, 1);
         assert.equal(script.chat.length, 1);
-        assert.deepEqual(renders.at(-1).options, { transient: true });
+        assert.ok(renders.some(render => render.options.transient));
+        assert.deepEqual(renders.at(-1).options, { transient: false });
         assert.equal(script.chat[0], message);
         assert.equal(message.mes, 'handoff answer');
         assert.equal(message.extra.tauritavern, undefined);

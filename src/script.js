@@ -15,6 +15,7 @@ import { getPromptCacheUsage } from './scripts/util/prompt-cache-usage.js';
 import { formatGenerationTimer, updateMessageGenerationInfo } from './scripts/message-generation-info.js';
 import { registerLifecycleFlushHandler } from './tauri/main/services/lifecycle/lifecycle-flush-service.js';
 import {
+    prepareMesTextHtmlWithRuntimePolicy,
     replaceMesTextHtmlWithRuntimePolicy,
     replaceTransientMesTextHtmlWithRuntimePolicy,
 } from './scripts/tauri/message/mes-text-write.js';
@@ -725,12 +726,16 @@ const chatSurface = installChatSurfaceRuntime({
     root: /** @type {HTMLElement} */ (chatElement[0]),
     getMessages: () => chat,
     prepareMaterializeOptions: prepareMessageRegexOptions,
+    formatMessageContent: (message, messageId) => getMessageTextHTML(message, { messageId }),
+    prepareContentTransaction: prepareMesTextHtmlWithRuntimePolicy,
+    emitEvent: eventSource.emit.bind(eventSource),
     materializeMessage: ({ message, messageId, frontendSourceHandoffEvent, materializeOptions }) => updateMessageElement(message, {
         messageId,
         frontendSourceHandoffEvent,
         adjustMediaScroll: materializeOptions?.adjustMediaScroll ?? SCROLL_BEHAVIOR.NONE,
         regexSourceText: materializeOptions?.regexSourceText,
         regexedText: materializeOptions?.regexedText,
+        transient: materializeOptions?.transient,
     }),
     syncMountedViewState: syncMountedChatViewState,
     onFault: error => {
@@ -738,6 +743,8 @@ const chatSurface = installChatSurfaceRuntime({
         void offerChatVirtualizationRecovery(error);
     },
 });
+
+export const finalizeMessageContent = chatSurface.finishContent;
 
 let dialogueResolve = null;
 let dialogueCloseStop = false;
@@ -2700,19 +2707,18 @@ function insertSVGIcon(mes, extra) {
  * @param {boolean} [options.transient=false] Whether to defer decorators and embedded runtimes until final content
  */
 export function updateMessageBlock(messageId, message, { rerenderMessage = true, transient = false } = {}) {
+    if (rerenderMessage) chatSurface.setContentTransient(message, transient);
     const messageElement = chatElement.find(`[mesid="${messageId}"]`);
     if (messageElement.length === 0) {
         return;
     }
     if (rerenderMessage) {
-        const text = message?.extra?.display_text ?? message.mes;
         const replace = transient
             ? replaceTransientMesTextHtmlWithRuntimePolicy
             : replaceMesTextHtmlWithRuntimePolicy;
         replace(
             /** @type {HTMLElement} */ (messageElement[0]),
-            getToolMessageHTML(message, messageId)
-                ?? messageFormatting(text, message.name, message.is_system, message.is_user, messageId, {}, false),
+            getMessageTextHTML(message, { messageId }),
         );
     }
 
@@ -3348,9 +3354,10 @@ function updateToolCallUI(messageElement, messageId) {
  * @param {number} [options.insertBefore=null] Message ID to insert the new message before
  * @param {number} [options.forceId=null] Force the message ID
  * @param {boolean} [options.showSwipes=true] Whether to refresh the swipe buttons.
+ * @param {boolean} [options.transient=false] Whether content is still being generated.
  * @returns {JQuery<HTMLElement>} The newly added message element
  */
-export function addOneMessage(mes, { type = undefined, insertAfter = null, scroll = true, insertBefore = null, forceId = null, showSwipes = true } = {}) {
+export function addOneMessage(mes, { type = undefined, insertAfter = null, scroll = true, insertBefore = null, forceId = null, showSwipes = true, transient = false } = {}) {
     // Callers push the new message to chat before calling addOneMessage
     const messageId = (() => {
         if (typeof forceId === 'number') {
@@ -3378,13 +3385,13 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
         mes.swipes ??= [mes.mes];
         //This keeps listeners intact.
         messageElement = chatElement.find(`[mesid="${messageId}"]`);
-        updateMessageElement(mes, { messageId, messageElement, adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE });
+        updateMessageElement(mes, { messageId, messageElement, adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE, transient });
     } else {
         reconcileMountedChatSurface({
             includeMessageIds: [messageId],
             materializeOptionsByMessageId: new Map([[
                 messageId,
-                { adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE },
+                { adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE, transient },
             ]]),
         });
         messageElement = $(chatSurface.getMessageElement(messageId));
@@ -3411,9 +3418,10 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
  * @param {string|null} [options.frontendSourceHandoffEvent=null] Event after which detached frontend source cover is released.
  * @param {string} [options.regexSourceText] Original display text before regex.
  * @param {string} [options.regexedText] Precomputed display regex output.
+ * @param {boolean} [options.transient=false] Whether to defer content processors and runtimes.
  * @returns {JQuery<HTMLElement>} Rendered HTMLElement.
  */
-export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, frontendSourceHandoffEvent = null, regexSourceText, regexedText } = {}) {
+export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, frontendSourceHandoffEvent = null, regexSourceText, regexedText, transient = false } = {}) {
     let avatarImg = getThumbnailUrl('persona', user_avatar);
 
     //for non-user messages
@@ -3489,7 +3497,8 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     });
 
     appendMediaToMessage(mes, messageElement, adjustMediaScroll);
-    replaceMesTextHtmlWithRuntimePolicy(
+    const replaceContent = transient ? replaceTransientMesTextHtmlWithRuntimePolicy : replaceMesTextHtmlWithRuntimePolicy;
+    replaceContent(
         /** @type {HTMLElement} */ (messageElement[0]),
         messageHTML,
         { frontendSourceHandoffEvent },
@@ -4607,13 +4616,9 @@ class StreamingProcessor {
                     fadeIn: power_user.stream_fade_in,
                 })
             ) {
-                if (isFinal) {
-                    replaceMesTextHtmlWithRuntimePolicy(this.messageDom, formattedText);
-                } else {
-                    replaceTransientMesTextHtmlWithRuntimePolicy(this.messageDom, formattedText, {
-                        fadeIn: power_user.stream_fade_in,
-                    });
-                }
+                replaceTransientMesTextHtmlWithRuntimePolicy(this.messageDom, formattedText, {
+                    fadeIn: !isFinal && power_user.stream_fade_in,
+                });
                 this.lastCommittedHtml = formattedText;
             }
 
@@ -4700,8 +4705,8 @@ class StreamingProcessor {
             const emitMessageEvents = shouldEmitCharacterMessageEvents(message, hasToolCalls);
             if (emitMessageEvents) {
                 await eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
-                await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, this.messageId, this.type);
             }
+            await finalizeMessageContent(messageId, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, this.type);
         } else {
             await eventSource.emit(event_types.IMPERSONATE_READY, text);
         }
@@ -4723,16 +4728,18 @@ class StreamingProcessor {
         playMessageSound();
     }
 
-    onErrorStreaming() {
+    async onErrorStreaming() {
         this.abortController.abort();
         this.isStopped = true;
 
         this.markUIGenStopped();
 
-        const noEmitTypes = ['swipe', 'impersonate', 'continue'];
-        if (!noEmitTypes.includes(this.type)) {
-            eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
-            eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, this.messageId, this.type);
+        const emitMessageEvents = !['swipe', 'impersonate', 'continue'].includes(this.type);
+        if (emitMessageEvents) {
+            await eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
+        }
+        if (this.type !== 'impersonate' && this.messageId >= 0) {
+            await finalizeMessageContent(this.messageId, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, this.type);
         }
     }
 
@@ -4817,7 +4824,7 @@ class StreamingProcessor {
             // in the case of a self-inflicted abort, we have already cleaned up
             if (!this.isFinished) {
                 console.error(err);
-                this.onErrorStreaming();
+                await this.onErrorStreaming();
             }
             return this.result;
         }
@@ -7258,7 +7265,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
             await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
             await reloadCurrentChat();
         });
-        await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
+        await finalizeMessageContent(insertAt, event_types.USER_MESSAGE_RENDERED);
     } else {
         let chat_id;
         await withChatSurfaceStructureMutation(async () => {
@@ -7268,7 +7275,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
             await eventSource.emit(event_types.MESSAGE_SENT, chat_id);
             addOneMessage(message);
         });
-        await eventSource.emit(event_types.USER_MESSAGE_RENDERED, chat_id);
+        await finalizeMessageContent(chat_id, event_types.USER_MESSAGE_RENDERED);
     }
 
     return message;
@@ -8081,8 +8088,8 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
             const chat_id = (chat.length - 1);
             const emitMessageEvents = !fromStreaming && shouldEmitCharacterMessageEvents(chat[chat_id], hasToolCalls);
             emitMessageEvents && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-            addOneMessage(chat[chat_id], { type: 'swipe' });
-            emitMessageEvents && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
+            addOneMessage(chat[chat_id], { type: 'swipe', transient: fromStreaming });
+            if (!fromStreaming) await finalizeMessageContent(chat_id, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, type);
         } else {
             lastMessage.mes = getMessage;
         }
@@ -8112,8 +8119,8 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         const chat_id = (chat.length - 1);
         const emitMessageEvents = !fromStreaming && shouldEmitCharacterMessageEvents(chat[chat_id], hasToolCalls);
         emitMessageEvents && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { type: 'swipe' });
-        emitMessageEvents && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
+        addOneMessage(chat[chat_id], { type: 'swipe', transient: fromStreaming });
+        if (!fromStreaming) await finalizeMessageContent(chat_id, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, type);
     } else if (type === 'appendFinal') {
         oldMessage = lastMessage.mes;
         console.debug('Trying to appendFinal.');
@@ -8140,8 +8147,8 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         const chat_id = (chat.length - 1);
         const emitMessageEvents = !fromStreaming && shouldEmitCharacterMessageEvents(chat[chat_id], hasToolCalls);
         emitMessageEvents && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { type: 'swipe' });
-        emitMessageEvents && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
+        addOneMessage(chat[chat_id], { type: 'swipe', transient: fromStreaming });
+        if (!fromStreaming) await finalizeMessageContent(chat_id, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, type);
     } else {
         console.debug('entering chat update routine for non-swipe post');
         if (power_user.trim_spaces) {
@@ -8188,9 +8195,9 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         await withChatSurfaceStructureMutation(async () => {
             chat.push(newMessage);
             emitMessageEvents && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-            addOneMessage(chat[chat_id]);
+            addOneMessage(chat[chat_id], { transient: fromStreaming });
         });
-        emitMessageEvents && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
+        if (!fromStreaming) await finalizeMessageContent(chat_id, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, type);
     }
 
     const item = chat[chat.length - 1];
@@ -9180,7 +9187,7 @@ async function getChatResult({ allowNewChat = false } = {}) {
     if (chat.length === 1) {
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, 'first_message');
-        await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, 'first_message');
+        await finalizeMessageContent(chat_id, event_types.CHARACTER_MESSAGE_RENDERED, 'first_message');
     }
 }
 
@@ -9845,7 +9852,6 @@ export async function messageEdit(editMessageId) {
  * @param {number} [messageId=this_edit_mes_id]
  */
 async function messageEditCancel(messageId = this_edit_mes_id) {
-    let text = chat[messageId].mes;
     let thisMesDiv;
     // If this is the button then select it's parent. Otherwise, select by messageId.
     if (this?.classList?.contains('mes_edit_cancel')) {
@@ -9860,16 +9866,7 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
 
     replaceMesTextHtmlWithRuntimePolicy(
         /** @type {HTMLElement} */ (thisMesDiv[0]),
-        getToolMessageHTML(chat[messageId], messageId)
-            ?? messageFormatting(
-                text,
-                this_edit_mes_chname,
-                chat[messageId].is_system,
-                chat[messageId].is_user,
-                messageId,
-                {},
-                false,
-            ),
+        getMessageTextHTML(chat[messageId], { messageId }),
     );
     appendMediaToMessage(chat[messageId], thisMesDiv);
 
@@ -9878,7 +9875,7 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
         reasoningEditDone.trigger('click');
     }
 
-    await eventSource.emit(event_types.MESSAGE_UPDATED, messageId);
+    await finalizeMessageContent(messageId, event_types.MESSAGE_UPDATED);
     if (messageId == this_edit_mes_id) {
         this_edit_mes_id = undefined;
         syncChatSurfaceProjectionHold();
@@ -9986,25 +9983,16 @@ async function messageEditDone(div) {
         return;
     }
 
-    let { mesBlock, text, mes, bias } = updateMessage(div);
+    const { mesBlock, bias } = updateMessage(div);
 
     await eventSource.emit(event_types.MESSAGE_EDITED, this_edit_mes_id);
-    text = chat[this_edit_mes_id]?.mes ?? text;
+    const mes = chat[this_edit_mes_id];
     mesBlock.find('.mes_edit_buttons').css('display', 'none');
     mesBlock.find('.mes_buttons').css('display', '');
 
     replaceMesTextHtmlWithRuntimePolicy(
         /** @type {HTMLElement} */ (div.closest('.mes')[0]),
-        getToolMessageHTML(mes, this_edit_mes_id)
-            ?? messageFormatting(
-                text,
-                this_edit_mes_chname,
-                mes.is_system,
-                mes.is_user,
-                this_edit_mes_id,
-                {},
-                false,
-            ),
+        getMessageTextHTML(mes, { messageId: this_edit_mes_id }),
     );
     mesBlock.find('.mes_bias').empty();
     mesBlock.find('.mes_bias').append(messageFormatting(bias, '', false, false, -1, {}, false));
@@ -10015,7 +10003,7 @@ async function messageEditDone(div) {
         reasoningEditDone.trigger('click');
     }
 
-    await eventSource.emit(event_types.MESSAGE_UPDATED, this_edit_mes_id);
+    await finalizeMessageContent(this_edit_mes_id, event_types.MESSAGE_UPDATED);
     this_edit_mes_id = undefined;
     syncChatSurfaceProjectionHold();
     await saveChatConditional();
@@ -11653,7 +11641,7 @@ export async function createOrEditCharacter(e) {
                     await clearChat();
                     await printMessages();
                 });
-                await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, 'first_message');
+                await finalizeMessageContent(messageId, event_types.CHARACTER_MESSAGE_RENDERED, 'first_message');
                 await saveChatConditional();
             }
         } catch (error) {
@@ -12023,6 +12011,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
             const scroll = (mesId == chat.length - 1);
             //The swipe buttons will be refreshed in endSwipe(), refreshing them now will cause flickering.
             addOneMessage(chat[mesId], { type: 'swipe', forceId: mesId, scroll: scroll, showSwipes: false });
+            await finalizeMessageContent(mesId);
 
             if (shouldCountMessageTokens()) {
                 if (!chat[mesId].extra) {
