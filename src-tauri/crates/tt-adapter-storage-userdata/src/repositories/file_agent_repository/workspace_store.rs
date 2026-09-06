@@ -5,7 +5,7 @@ use tokio::fs;
 use super::FileAgentRepository;
 use super::fs_tree::{sha256_hex, workspace_file_from_text, workspace_path_from_run_dir};
 use super::paths::validate_workspace_root_path;
-use tt_adapter_storage_core::file_system::{replace_file_with_fallback, unique_temp_path};
+use tt_adapter_storage_core::file_system::{replace_file, unique_temp_path};
 use tt_domain::errors::{DomainError, WorkspaceWriteConflictKind};
 use tt_domain::models::agent::profile::ResolvedAgentProfile;
 use tt_domain::models::agent::{
@@ -106,7 +106,7 @@ impl WorkspaceRepository for FileAgentRepository {
                     error
                 ))
             })?;
-        replace_file_with_fallback(&temp_path, &target).await?;
+        replace_file(&temp_path, &target).await?;
 
         Ok(workspace_file_from_text(path.clone(), text.to_string()))
     }
@@ -139,7 +139,7 @@ impl WorkspaceRepository for FileAgentRepository {
                     error
                 ))
             })?;
-        replace_file_with_fallback(&temp_path, &target).await?;
+        replace_file(&temp_path, &target).await?;
 
         Ok(WorkspaceAppendResult {
             file: workspace_file_from_text(path.clone(), updated),
