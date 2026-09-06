@@ -1178,12 +1178,23 @@ type TauriTavernChatSurfaceRegistration = {
     fault: (error: unknown) => void;
 };
 
+type TauriTavernChatSurfaceContentProcessor = {
+    id: string;
+    prepare: (
+        context: { readonly message: ChatMessage; readonly mesid: number; readonly signal: AbortSignal },
+        renderBase: () => Promise<string>,
+    ) => string | Promise<string>;
+};
+
 type TauriTavernChatSurfaceApi = {
     readonly protocolVersion: 1;
     isManagedOwnershipRequired: () => boolean;
     registerParticipant: (
         participant: TauriTavernChatSurfaceParticipant,
     ) => TauriTavernChatSurfaceRegistration;
+    registerContentProcessor: (
+        processor: TauriTavernChatSurfaceContentProcessor,
+    ) => { refresh: () => Promise<void> };
 };
 
 type TauriTavernHostApi = {
