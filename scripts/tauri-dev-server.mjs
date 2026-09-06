@@ -218,10 +218,34 @@ function scheduleReload() {
     }, 80);
 }
 
+// Events whose mtime is older than this window are not edits.
+const RELOAD_MTIME_WINDOW_MS = 30_000;
+
 function handleFrontendChange(filePath) {
-    if (!filePath || !isRspackOwned(filePath)) {
-        scheduleReload();
+    // Windows recursive fs.watch can report a directory-level change without a
+    // filename. It cannot identify a reloadable source file, so ignore it.
+    if (!filePath || isRspackOwned(filePath)) {
+        return;
     }
+
+    // Windows fs.watch reports NTFS last-access updates as change events.
+    // When last-access updates are enabled (fsutil DisableLastAccess=0/2),
+    // every page load reads fonts/styles/images under src/, which fires
+    // events here and forms a reload -> fetch -> last-access feedback loop.
+    // last-access never changes mtime, so noise events carry a historical
+    // mtime while a real edit is always recent; discriminate on that. The
+    // trade-off: writers that intentionally preserve mtime do not reload.
+    let stat;
+    try {
+        stat = fs.statSync(filePath);
+    } catch {
+        return;
+    }
+    if (Date.now() - stat.mtimeMs > RELOAD_MTIME_WINDOW_MS) {
+        return;
+    }
+
+    scheduleReload();
 }
 
 function watchTree(root) {
