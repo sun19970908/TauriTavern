@@ -1,7 +1,8 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use tt_adapter_quickjs::QuickJsScriptEngine;
-use tt_adapter_storage_core::FileChatRepository;
 use tt_adapter_storage_core::chat_directory_identity::new_shared_chat_alias_store_for_user_dir;
+use tt_adapter_storage_core::{FileChatRepository, FileSettingsRepository};
 use tt_adapter_storage_core::{FileLlmConnectionRepository, FileMcpServerRepository};
 use tt_adapter_storage_userdata::FileAgentProfileRepository;
 use tt_adapter_storage_userdata::FileAgentRepository;
@@ -38,7 +39,7 @@ use tt_application::dto::character_dto::{
 use tt_application::dto::chat_completion_dto::ChatCompletionGenerateRequestDto;
 use tt_application::errors::ApplicationError;
 use tt_application::services::agent_model_gateway::{
-    AgentModelExchange, AgentModelGateway, AgentToolCallDelta, decode_chat_completion_response,
+    AgentModelExchange, AgentModelGateway, AgentModelStreamDelta, decode_chat_completion_response,
 };
 use tt_application::services::agent_profile_service::{
     AgentProfileResolveInput, AgentProfileService,
@@ -94,6 +95,7 @@ struct AgentRuntimeFixture {
     agent_repository: Arc<FileAgentRepository>,
     chat_repository: Arc<FileChatRepository>,
     profile_service: Arc<AgentProfileService>,
+    preset_repository: Arc<TestPresetRepository>,
     model_gateway: Arc<MockAgentModelGateway>,
     mcp_service: Arc<McpService>,
     mcp_gateway: Arc<ContractMcpGateway>,
@@ -154,6 +156,7 @@ async fn character_service_with_world_repository(
     let lifecycle_service = Arc::new(AgentWorkspaceLifecycleService::new(
         lifecycle_repository,
         Arc::new(NoActiveAgentRuns),
+        Arc::new(Mutex::new(())),
     ));
 
     (
@@ -198,7 +201,7 @@ fn agent_runtime_fixture_with_results(
     let profile_repository: Arc<dyn AgentProfileRepository> = profile_file_repository.clone();
     let profile_health_repository: Arc<dyn AgentProfileStorageHealthRepository> =
         profile_file_repository;
-    let preset_repository = Arc::new(NullPresetRepository);
+    let preset_repository = Arc::new(TestPresetRepository::default());
     let profile_service = Arc::new(AgentProfileService::new(
         profile_repository,
         profile_health_repository,
@@ -207,12 +210,15 @@ fn agent_runtime_fixture_with_results(
     let skill_service = Arc::new(SkillService::new(Arc::new(FileSkillRepository::new(
         root.join("_tauritavern/skills"),
     ))));
-    let llm_connection_service = Arc::new(LlmConnectionService::new(Arc::new(
-        FileLlmConnectionRepository::new(root.join("_tauritavern/llm-connections")),
-    )));
+    let llm_connection_service = Arc::new(LlmConnectionService::new(
+        Arc::new(FileLlmConnectionRepository::new(
+            root.join("_tauritavern/llm-connections"),
+        )),
+        Arc::new(FileSettingsRepository::new(default_user.clone())),
+    ));
     let prompt_assembly_service = Arc::new(PromptAssemblyService::new(
         profile_service.clone(),
-        preset_repository,
+        preset_repository.clone(),
         llm_connection_service.clone(),
     ));
     let model_gateway = Arc::new(MockAgentModelGateway::with_results(responses));
@@ -241,6 +247,7 @@ fn agent_runtime_fixture_with_results(
         agent_repository,
         chat_repository: chat_file_repository,
         profile_service,
+        preset_repository,
         model_gateway,
         mcp_service,
         mcp_gateway,
@@ -305,6 +312,27 @@ async fn start_contract_agent_run(
     label: &str,
     stream: Option<bool>,
 ) -> AgentRunHandleDto {
+    start_contract_agent_run_with_options(
+        fixture,
+        profile,
+        label,
+        AgentStartRunOptionsDto {
+            stream,
+            presentation: Some(presentation),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+}
+
+async fn start_contract_agent_run_with_options(
+    fixture: &AgentRuntimeFixture,
+    profile: &tt_domain::models::agent::profile::ResolvedAgentProfile,
+    label: &str,
+    options: AgentStartRunOptionsDto,
+    frozen_run_input_snapshot: Option<Value>,
+) -> AgentRunHandleDto {
     let request = chat_request(label);
     let file_name = format!("{label}.jsonl");
     let mut chat = Chat::new("User", "Alice");
@@ -329,13 +357,10 @@ async fn start_contract_agent_run(
                 "contextPolicy": &profile.context,
                 "chatCompletionPayload": request.payload,
             })),
-            frozen_run_input_snapshot: None,
+            frozen_run_input_snapshot,
             generation_intent: None,
             skill_scope_refs: AgentSkillScopeRefsDto::default(),
-            options: AgentStartRunOptionsDto {
-                stream,
-                presentation: Some(presentation),
-            },
+            options,
         })
         .await
         .expect("start contract Agent run")
@@ -717,11 +742,18 @@ impl AgentRunActivity for NoActiveAgentRuns {
     }
 }
 
-struct NullPresetRepository;
+#[derive(Default)]
+struct TestPresetRepository {
+    presets: Mutex<HashMap<(String, PresetType), Preset>>,
+}
 
 #[async_trait]
-impl PresetRepository for NullPresetRepository {
-    async fn save_preset(&self, _preset: &Preset) -> Result<(), DomainError> {
+impl PresetRepository for TestPresetRepository {
+    async fn save_preset(&self, preset: &Preset) -> Result<(), DomainError> {
+        self.presets.lock().await.insert(
+            (preset.name.clone(), preset.preset_type.clone()),
+            preset.clone(),
+        );
         Ok(())
     }
 
@@ -735,18 +767,27 @@ impl PresetRepository for NullPresetRepository {
 
     async fn preset_exists(
         &self,
-        _name: &str,
-        _preset_type: &PresetType,
+        name: &str,
+        preset_type: &PresetType,
     ) -> Result<bool, DomainError> {
-        Ok(false)
+        Ok(self
+            .presets
+            .lock()
+            .await
+            .contains_key(&(name.to_string(), preset_type.clone())))
     }
 
     async fn get_preset(
         &self,
-        _name: &str,
-        _preset_type: &PresetType,
+        name: &str,
+        preset_type: &PresetType,
     ) -> Result<Option<Preset>, DomainError> {
-        Ok(None)
+        Ok(self
+            .presets
+            .lock()
+            .await
+            .get(&(name.to_string(), preset_type.clone()))
+            .cloned())
     }
 
     async fn list_presets(&self, _preset_type: &PresetType) -> Result<Vec<String>, DomainError> {
@@ -766,6 +807,8 @@ impl PresetRepository for NullPresetRepository {
 struct ContractMcpGateway {
     calls: Mutex<Vec<(String, serde_json::Map<String, Value>)>>,
     outcomes: Mutex<VecDeque<McpCallOutcome>>,
+    wait_for_cancel: AtomicBool,
+    call_started: tokio::sync::Notify,
 }
 
 #[async_trait]
@@ -803,12 +846,16 @@ impl McpGateway for ContractMcpGateway {
         _protocol_version: McpProtocolVersionPreference,
         native_name: &str,
         arguments: serde_json::Map<String, Value>,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> Result<McpCallOutcome, DomainError> {
         self.calls
             .lock()
             .await
             .push((native_name.to_string(), arguments));
+        self.call_started.notify_one();
+        if self.wait_for_cancel.load(Ordering::SeqCst) {
+            cancel.cancelled().await;
+        }
         if let Some(outcome) = self.outcomes.lock().await.pop_front() {
             return Ok(outcome);
         }
@@ -828,7 +875,10 @@ impl McpGateway for ContractMcpGateway {
 
 struct MockAgentModelGateway {
     responses: Mutex<VecDeque<Result<Value, ApplicationError>>>,
+    invocation_responses: Mutex<HashMap<String, VecDeque<Result<Value, ApplicationError>>>>,
     requests: Mutex<Vec<AgentModelRequest>>,
+    request_count: watch::Sender<usize>,
+    wait_for_cancel_on_request: AtomicUsize,
     stream_requests: Mutex<Vec<bool>>,
     closed_sessions: Mutex<Vec<String>>,
 }
@@ -837,7 +887,10 @@ impl MockAgentModelGateway {
     fn with_results(responses: Vec<Result<Value, ApplicationError>>) -> Self {
         Self {
             responses: Mutex::new(responses.into()),
+            invocation_responses: Mutex::new(HashMap::new()),
             requests: Mutex::new(Vec::new()),
+            request_count: watch::channel(0).0,
+            wait_for_cancel_on_request: AtomicUsize::new(0),
             stream_requests: Mutex::new(Vec::new()),
             closed_sessions: Mutex::new(Vec::new()),
         }
@@ -861,15 +914,37 @@ impl AgentModelGateway for MockAgentModelGateway {
     async fn generate_with_cancel(
         &self,
         request: &AgentModelRequest,
-        on_tool_call_delta: Option<&mut (dyn FnMut(AgentToolCallDelta) + Send)>,
-        _cancel: watch::Receiver<bool>,
+        on_delta: Option<&mut (dyn FnMut(AgentModelStreamDelta) + Send)>,
+        mut cancel: watch::Receiver<bool>,
     ) -> Result<AgentModelExchange, ApplicationError> {
-        self.stream_requests
+        self.stream_requests.lock().await.push(on_delta.is_some());
+        let request_count = {
+            let mut requests = self.requests.lock().await;
+            requests.push(request.clone());
+            requests.len()
+        };
+        self.request_count.send_replace(request_count);
+        if self.wait_for_cancel_on_request.load(Ordering::SeqCst) == request_count {
+            cancel.wait_for(|cancelled| *cancelled).await.map_err(|_| {
+                ApplicationError::InternalError("mock cancellation channel closed".to_string())
+            })?;
+            return Err(ApplicationError::Cancelled(
+                "model request cancelled".to_string(),
+            ));
+        }
+        let invocation_id = request.provider_state["invocationId"]
+            .as_str()
+            .unwrap_or("");
+        let response = match self
+            .invocation_responses
             .lock()
             .await
-            .push(on_tool_call_delta.is_some());
-        self.requests.lock().await.push((*request).clone());
-        let response = self.responses.lock().await.pop_front().ok_or_else(|| {
+            .get_mut(invocation_id)
+        {
+            Some(responses) => responses.pop_front(),
+            None => self.responses.lock().await.pop_front(),
+        };
+        let response = response.ok_or_else(|| {
             ApplicationError::ValidationError(
                 "mock_model.empty_responses: no response left".to_string(),
             )

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, oneshot, watch};
 
 use crate::dto::agent_dto::{
@@ -36,8 +37,10 @@ use tt_ports::repositories::workspace_repository::WorkspaceRepository;
 use tt_ports::skill_script::SkillScriptEngine;
 
 mod artifacts;
+mod checkpoint;
 mod commit;
 mod commit_ledger;
+mod continuation;
 mod delegation;
 mod error_payload;
 mod executor;
@@ -50,24 +53,26 @@ mod loop_runner;
 mod markdown;
 mod model_response_store;
 mod model_retry;
+mod model_stream_projection;
 mod model_turn_display;
 mod prompt_assembly;
 mod prompt_snapshot;
+mod revision;
 mod scheduler;
 mod skill_scope;
+mod task_details;
 mod timeline_projection;
-mod tool_call_projection;
 mod tool_execution;
 mod tool_snapshot;
 
 #[cfg(test)]
 mod tests;
 
-use scheduler::ActiveRunHandle;
-pub use tool_call_projection::{
-    AgentRunLiveCall, AgentRunLiveCallKey, AgentRunLiveProjection, ModelAttemptGeneration,
-    ToolCallProjection,
+pub use model_stream_projection::{
+    AgentRunLiveCall, AgentRunLiveCallKey, AgentRunLiveProjection, AgentRunLiveReasoning,
+    ModelAttemptGeneration, ToolCallProjection,
 };
+use scheduler::ActiveRunHandle;
 
 pub(super) type AgentCancelReceiver = watch::Receiver<bool>;
 
@@ -98,7 +103,10 @@ pub(super) struct PendingPersistentStateMetadataUpdate {
     pub(super) sender: oneshot::Sender<Result<(), String>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PreparedInvocation {
+    #[serde(skip)]
     frozen_macros: Arc<tt_domain::frozen_macros::FrozenMacros>,
     invocation: AgentInvocation,
     delegation_task_id: Option<String>,
@@ -131,6 +139,7 @@ pub struct AgentRuntimeService {
     tool_registry: BuiltinAgentToolRegistry,
     tool_dispatcher: AgentToolDispatcher,
     active_runs: RwLock<HashMap<String, Arc<ActiveRunHandle>>>,
+    run_lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
     active_chat_commits: RwLock<HashMap<String, PendingHostChatCommit>>,
     active_prompt_assemblies: RwLock<HashMap<String, PendingHostPromptAssembly>>,
     active_persistent_state_metadata_updates:
@@ -180,10 +189,15 @@ impl AgentRuntimeService {
             tool_registry,
             tool_dispatcher,
             active_runs: RwLock::new(HashMap::new()),
+            run_lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
             active_chat_commits: RwLock::new(HashMap::new()),
             active_prompt_assemblies: RwLock::new(HashMap::new()),
             active_persistent_state_metadata_updates: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub fn run_lifecycle_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.run_lifecycle_lock)
     }
 
     pub fn tool_catalog(&self) -> &ToolCatalog {

@@ -236,6 +236,14 @@ fn fake_sha(text: &str) -> String {
 
 #[async_trait]
 impl WorkspaceRepository for FakeWorkspaceRepo {
+    async fn validate_persistent_state(
+        &self,
+        _workspace_id: &str,
+        _state_id: &str,
+    ) -> Result<(), DomainError> {
+        unreachable!("script tests do not start runs")
+    }
+
     async fn initialize_run(
         &self,
         _run: &AgentRun,
@@ -389,6 +397,7 @@ impl WorkspaceRepository for FakeWorkspaceRepo {
     async fn commit_persistent_changes(
         &self,
         _run_id: &str,
+        _previous_state_id: Option<&str>,
     ) -> Result<WorkspacePersistentChangeSet, DomainError> {
         unreachable!("not needed")
     }

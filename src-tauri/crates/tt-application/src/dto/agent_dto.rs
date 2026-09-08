@@ -277,6 +277,12 @@ pub struct AgentLoadProfileResultDto {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStartRunOptionsDto {
+    /// The Host API supplies the final chat presentation before checkpointing.
+    #[serde(default)]
+    pub host_presentation: bool,
+    /// Explicit user choice; never inferred from an unavailable inherited version.
+    #[serde(default)]
+    pub start_with_empty_persist: bool,
     #[serde(default)]
     pub stream: Option<bool>,
     #[serde(default)]
@@ -291,6 +297,56 @@ pub struct AgentRunHandleDto {
     pub stable_chat_id: String,
     pub generation_type: String,
     pub status: AgentRunStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentReadRunCheckpointDto {
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentReadRunCheckpointResultDto {
+    pub run: AgentRunHandleDto,
+    pub terminal_seq: u64,
+    pub presentation: Option<Value>,
+    pub next_step: String,
+    pub round: usize,
+    pub max_rounds: usize,
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentResumeRunDto {
+    pub run_id: String,
+    pub expected_terminal_seq: u64,
+    pub chat_ref: AgentChatRef,
+    pub stable_chat_id: String,
+    #[serde(default)]
+    pub additional_rounds: usize,
+    #[serde(default)]
+    pub host_presentation: bool,
+    #[serde(default)]
+    pub revision: Option<AgentOutputRevisionDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOutputRevisionDto {
+    pub guidance: String,
+    pub previous_output: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFinishRunPresentationDto {
+    pub run_id: String,
+    pub terminal_seq: u64,
+    pub presentation: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -324,6 +380,15 @@ pub enum AgentRunLiveToolCallDto {
     },
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunLiveReasoningDto {
+    pub invocation_id: String,
+    pub invocation_exit_policy: AgentInvocationExitPolicy,
+    pub text: String,
+    pub tool_ids: Vec<ToolId>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentRunLiveFieldDto {
@@ -340,8 +405,21 @@ pub enum AgentRunLiveFieldDto {
     rename_all_fields = "camelCase"
 )]
 pub enum AgentRunLiveUpdateDto {
+    ReasoningReplace {
+        reasoning: AgentRunLiveReasoningDto,
+    },
+    ReasoningAppend {
+        invocation_id: String,
+        text: String,
+        /// Newly observed tool IDs, appended independently of text.
+        tool_ids: Vec<ToolId>,
+    },
+    ReasoningRemove {
+        invocation_id: String,
+    },
     Snapshot {
         calls: Vec<AgentRunLiveToolCallDto>,
+        reasoning: Vec<AgentRunLiveReasoningDto>,
     },
     Append {
         invocation_id: String,
@@ -661,6 +739,50 @@ pub struct AgentRunTimelineDelegationEdgeDto {
 pub struct AgentReadWorkspaceFileDto {
     pub run_id: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentReadTaskDetailDto {
+    pub run_id: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub include_result: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTaskBriefDto {
+    pub objective: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(flatten)]
+    pub details: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTaskResultDto {
+    pub summary: String,
+    pub summary_ref: Option<String>,
+    pub output: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTaskDetailDto {
+    pub run_id: String,
+    pub task_id: String,
+    pub parent_invocation_id: String,
+    pub child_invocation_id: String,
+    pub target_profile_id: String,
+    pub workspace_key: String,
+    pub continuation: AgentDelegationContinuation,
+    pub status: AgentTaskStatus,
+    pub task: AgentTaskBriefDto,
+    pub result_ref: Option<String>,
+    pub result: Option<AgentTaskResultDto>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

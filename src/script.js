@@ -11,8 +11,11 @@ import {
 } from './lib.js';
 import { getClientVersion as getBridgeClientVersion, getTauriTavernSettings, invoke, updateTauriTavernSettings } from './tauri-bridge.js';
 import { SILLYTAVERN_COMPAT_VERSION } from './compat-version.js';
+import { getPromptCacheUsage } from './scripts/util/prompt-cache-usage.js';
+import { formatGenerationTimer, updateMessageGenerationInfo } from './scripts/message-generation-info.js';
 import { registerLifecycleFlushHandler } from './tauri/main/services/lifecycle/lifecycle-flush-service.js';
 import {
+    prepareMesTextHtmlWithRuntimePolicy,
     replaceMesTextHtmlWithRuntimePolicy,
     replaceTransientMesTextHtmlWithRuntimePolicy,
 } from './scripts/tauri/message/mes-text-write.js';
@@ -47,10 +50,12 @@ import {
     createLegacyMcpGenerationContext,
     LegacyMcpOutcomeUnknownError,
 } from './scripts/tauritavern/legacy-mcp-tools.js';
+import { applyOutputPatches, buildOutputRevisionRequest } from './scripts/tauritavern/legacy-output-revision.js';
 import { getAgentGenerationOptions } from './scripts/tauritavern/agent/agent-generation-router.js';
 import {
     cancelActiveAgentRun,
     hasActiveAgentRun,
+    resumeAndWaitForAgentRun,
     startAndWaitForAgentRun,
     submitGuidanceToActiveAgentRun,
     subscribeAgentRunState,
@@ -785,12 +790,16 @@ const chatSurface = installChatSurfaceRuntime({
     root: /** @type {HTMLElement} */ (chatElement[0]),
     getMessages: () => chat,
     prepareMaterializeOptions: prepareMessageRegexOptions,
+    formatMessageContent: (message, messageId) => getMessageTextHTML(message, { messageId }),
+    prepareContentTransaction: prepareMesTextHtmlWithRuntimePolicy,
+    emitEvent: eventSource.emit.bind(eventSource),
     materializeMessage: ({ message, messageId, frontendSourceHandoffEvent, materializeOptions }) => updateMessageElement(message, {
         messageId,
         frontendSourceHandoffEvent,
         adjustMediaScroll: materializeOptions?.adjustMediaScroll ?? SCROLL_BEHAVIOR.NONE,
         regexSourceText: materializeOptions?.regexSourceText,
         regexedText: materializeOptions?.regexedText,
+        transient: materializeOptions?.transient,
     }),
     syncMountedViewState: syncMountedChatViewState,
     onFault: error => {
@@ -798,6 +807,8 @@ const chatSurface = installChatSurfaceRuntime({
         void offerChatVirtualizationRecovery(error);
     },
 });
+
+export const finalizeMessageContent = chatSurface.finishContent;
 
 let dialogueResolve = null;
 let dialogueCloseStop = false;
@@ -2498,13 +2509,8 @@ function substituteFirstMessage(mes, chName, isSystem, isUser, messageId, isReas
     if (Number(messageId) !== 0 || isSystem || isUser || isReasoning) {
         return mes;
     }
-    const source = mes;
-    mes = substituteParams(mes, undefined, chName);
-    const message = chat[messageId];
-    if (message && message.mes === source && message.extra?.display_text !== source) {
-        message.mes = mes;
-    }
-    return mes;
+    // Rendering must not rewrite saved text or desynchronize the selected swipe.
+    return substituteParams(mes, undefined, chName);
 }
 
 function removeMessagePromptBias(mes, chName, isSystem, isUser) {
@@ -2760,19 +2766,18 @@ function insertSVGIcon(mes, extra) {
  * @param {boolean} [options.transient=false] Whether to defer decorators and embedded runtimes until final content
  */
 export function updateMessageBlock(messageId, message, { rerenderMessage = true, transient = false } = {}) {
+    if (rerenderMessage) chatSurface.setContentTransient(message, transient);
     const messageElement = chatElement.find(`[mesid="${messageId}"]`);
     if (messageElement.length === 0) {
         return;
     }
     if (rerenderMessage) {
-        const text = message?.extra?.display_text ?? message.mes;
         const replace = transient
             ? replaceTransientMesTextHtmlWithRuntimePolicy
             : replaceMesTextHtmlWithRuntimePolicy;
         replace(
             /** @type {HTMLElement} */ (messageElement[0]),
-            getToolMessageHTML(message, messageId)
-                ?? messageFormatting(text, message.name, message.is_system, message.is_user, messageId, {}, false),
+            getMessageTextHTML(message, { messageId }),
         );
     }
 
@@ -2780,6 +2785,8 @@ export function updateMessageBlock(messageId, message, { rerenderMessage = true,
         return;
     }
 
+    const { tokenRate } = formatGenerationTimer(message.gen_started, message.gen_finished, message.extra?.token_count);
+    updateMessageGenerationInfo(messageElement[0], message, tokenRate);
     updateReasoningUI(messageElement);
 
     appendMediaToMessage(message, messageElement);
@@ -3406,9 +3413,10 @@ function updateToolCallUI(messageElement, messageId) {
  * @param {number} [options.insertBefore=null] Message ID to insert the new message before
  * @param {number} [options.forceId=null] Force the message ID
  * @param {boolean} [options.showSwipes=true] Whether to refresh the swipe buttons.
+ * @param {boolean} [options.transient=false] Whether content is still being generated.
  * @returns {JQuery<HTMLElement>} The newly added message element
  */
-export function addOneMessage(mes, { type = undefined, insertAfter = null, scroll = true, insertBefore = null, forceId = null, showSwipes = true } = {}) {
+export function addOneMessage(mes, { type = undefined, insertAfter = null, scroll = true, insertBefore = null, forceId = null, showSwipes = true, transient = false } = {}) {
     // Callers push the new message to chat before calling addOneMessage
     const messageId = (() => {
         if (typeof forceId === 'number') {
@@ -3436,13 +3444,13 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
         mes.swipes ??= [mes.mes];
         //This keeps listeners intact.
         messageElement = chatElement.find(`[mesid="${messageId}"]`);
-        updateMessageElement(mes, { messageId, messageElement, adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE });
+        updateMessageElement(mes, { messageId, messageElement, adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE, transient });
     } else {
         reconcileMountedChatSurface({
             includeMessageIds: [messageId],
             materializeOptionsByMessageId: new Map([[
                 messageId,
-                { adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE },
+                { adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE, transient },
             ]]),
         });
         messageElement = $(chatSurface.getMessageElement(messageId));
@@ -3469,9 +3477,10 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
  * @param {string|null} [options.frontendSourceHandoffEvent=null] Event after which detached frontend source cover is released.
  * @param {string} [options.regexSourceText] Original display text before regex.
  * @param {string} [options.regexedText] Precomputed display regex output.
+ * @param {boolean} [options.transient=false] Whether to defer content processors and runtimes.
  * @returns {JQuery<HTMLElement>} Rendered HTMLElement.
  */
-export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, frontendSourceHandoffEvent = null, regexSourceText, regexedText } = {}) {
+export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, frontendSourceHandoffEvent = null, regexSourceText, regexedText, transient = false } = {}) {
     let avatarImg = getThumbnailUrl('persona', user_avatar);
 
     //for non-user messages
@@ -3498,7 +3507,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     const messageHTML = getMessageTextHTML(mes, { messageId, regexSourceText, regexedText });
     const bookmarkLink = mes?.extra?.bookmark_link;
     const tokenCount = mes.extra?.token_count;
-    const { timerValue, timerTitle } = formatGenerationTimer(mes.gen_started, mes.gen_finished, mes.extra?.token_count, mes.extra?.reasoning_duration, mes.extra?.time_to_first_token);
+    const { timerValue, timerTitle, tokenRate } = formatGenerationTimer(mes.gen_started, mes.gen_finished, mes.extra?.token_count, mes.extra?.reasoning_duration, mes.extra?.time_to_first_token);
 
     messageElement.attr({
         'mesid': messageId,
@@ -3520,6 +3529,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     tokenCount && messageElement.find('.tokenCounterDisplay').text(`${tokenCount}t`);
     mes.title && messageElement.attr('title', mes.title);
     timerValue && messageElement.find('.mes_timer').attr('title', timerTitle).text(timerValue);
+    updateMessageGenerationInfo(messageElement[0], mes, tokenRate);
     bookmarkLink && updateBookmarkDisplay(messageElement);
 
     if (mes.extra?.bias !== '') {
@@ -3546,7 +3556,8 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     });
 
     appendMediaToMessage(mes, messageElement, adjustMediaScroll);
-    replaceMesTextHtmlWithRuntimePolicy(
+    const replaceContent = transient ? replaceTransientMesTextHtmlWithRuntimePolicy : replaceMesTextHtmlWithRuntimePolicy;
+    replaceContent(
         /** @type {HTMLElement} */ (messageElement[0]),
         messageHTML,
         { frontendSourceHandoffEvent },
@@ -3579,43 +3590,8 @@ export function formatCharacterAvatar(characterAvatar) {
     return `characters/${characterAvatar}`;
 }
 
-/**
- * Formats the title for the generation timer.
- * @param {MessageTimestamp} gen_started Date when generation was started
- * @param {MessageTimestamp} gen_finished Date when generation was finished
- * @param {number} tokenCount Number of tokens generated (0 if not available)
- * @param {number?} [reasoningDuration=null] Reasoning duration (null if no reasoning was done)
- * @param {number?} [timeToFirstToken=null] Time to first token
- * @returns {Object} Object containing the formatted timer value and title
- * @example
- * const { timerValue, timerTitle } = formatGenerationTimer(gen_started, gen_finished, tokenCount);
- * console.log(timerValue); // 1.2s
- * console.log(timerTitle); // Generation queued: 12:34:56 7 Jan 2021\nReply received: 12:34:57 7 Jan 2021\nTime to generate: 1.2 seconds\nToken rate: 5 t/s
- */
-function formatGenerationTimer(gen_started, gen_finished, tokenCount, reasoningDuration = null, timeToFirstToken = null) {
-    if (!gen_started || !gen_finished) {
-        return {};
-    }
-
-    const dateFormat = 'HH:mm:ss D MMM YYYY';
-    const start = moment(gen_started);
-    const finish = moment(gen_finished);
-    const seconds = finish.diff(start, 'seconds', true);
-    const timerValue = `${seconds.toFixed(1)}s`;
-    const timerTitle = [
-        `Generation queued: ${start.format(dateFormat)}`,
-        `Reply received: ${finish.format(dateFormat)}`,
-        `Time to generate: ${seconds} seconds`,
-        timeToFirstToken ? `Time to first token: ${timeToFirstToken / 1000} seconds` : '',
-        reasoningDuration > 0 ? `Time to think: ${reasoningDuration / 1000} seconds` : '',
-        tokenCount > 0 ? `Token rate: ${Number(tokenCount / seconds).toFixed(3)} t/s` : '',
-    ].filter(x => x).join('\n').trim();
-
-    if (isNaN(seconds) || seconds < 0) {
-        return { timerValue: '', timerTitle };
-    }
-
-    return { timerValue, timerTitle };
+function shouldCountMessageTokens() {
+    return power_user.message_token_count_enabled || power_user.message_token_rate_enabled;
 }
 
 let requestId = null;
@@ -4555,6 +4531,7 @@ class StreamingProcessor {
         this.reasoningSignature = null;
         /** @type {any?} */
         this.native = null;
+        this.promptCache = null;
     }
 
     /**
@@ -4598,6 +4575,8 @@ class StreamingProcessor {
             await saveReply({ type: this.type, getMessage: text, fromStreaming: true });
             messageId = chat.length - 1;
             await this.#checkDomElements(messageId, continueOnReasoning);
+            delete chat[messageId].extra.token_count;
+            $(this.messageDom).find('.mes_generation_info, .tokenCounterDisplay').empty();
             this.markUIGenStarted();
         }
         hideSwipeButtons({ hideCounters: true });
@@ -4651,6 +4630,7 @@ class StreamingProcessor {
                 chat[messageId].extra = {};
             }
             chat[messageId].extra.time_to_first_token = this.timeToFirstToken;
+            chat[messageId].extra.prompt_cache = this.promptCache ?? undefined;
 
             // Update reasoning
             await this.reasoningHandler.process(messageId, mesChanged, this.promptReasoning);
@@ -4658,7 +4638,7 @@ class StreamingProcessor {
 
             // Token count update.
             const tokenCountText = this.reasoningHandler.reasoning + processedText;
-            const currentTokenCount = isFinal && power_user.message_token_count_enabled ? await getTokenCountAsync(tokenCountText, 0) : 0;
+            const currentTokenCount = isFinal && shouldCountMessageTokens() ? await getTokenCountAsync(tokenCountText, 0) : 0;
             if (currentTokenCount) {
                 chat[messageId].extra.token_count = currentTokenCount;
                 if (this.messageTokenCounterDom instanceof HTMLElement) {
@@ -4695,17 +4675,16 @@ class StreamingProcessor {
                     fadeIn: power_user.stream_fade_in,
                 })
             ) {
-                if (isFinal) {
-                    replaceMesTextHtmlWithRuntimePolicy(this.messageDom, formattedText);
-                } else {
-                    replaceTransientMesTextHtmlWithRuntimePolicy(this.messageDom, formattedText, {
-                        fadeIn: power_user.stream_fade_in,
-                    });
-                }
+                replaceTransientMesTextHtmlWithRuntimePolicy(this.messageDom, formattedText, {
+                    fadeIn: !isFinal && power_user.stream_fade_in,
+                });
                 this.lastCommittedHtml = formattedText;
             }
 
             const timePassed = formatGenerationTimer(this.timeStarted, currentTime, currentTokenCount, this.reasoningHandler.getDuration(), this.timeToFirstToken);
+            if (isFinal) {
+                updateMessageGenerationInfo(this.messageDom, chat[messageId], timePassed.tokenRate);
+            }
             if (this.messageTimerDom instanceof HTMLElement) {
                 if (this.messageTimerDom.textContent !== timePassed.timerValue) {
                     this.messageTimerDom.textContent = timePassed.timerValue;
@@ -4785,8 +4764,8 @@ class StreamingProcessor {
             const emitMessageEvents = shouldEmitCharacterMessageEvents(message, hasToolCalls);
             if (emitMessageEvents) {
                 await eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
-                await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, this.messageId, this.type);
             }
+            await finalizeMessageContent(messageId, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, this.type);
         } else {
             await eventSource.emit(event_types.IMPERSONATE_READY, text);
         }
@@ -4808,16 +4787,18 @@ class StreamingProcessor {
         playMessageSound();
     }
 
-    onErrorStreaming() {
+    async onErrorStreaming() {
         this.abortController.abort();
         this.isStopped = true;
 
         this.markUIGenStopped();
 
-        const noEmitTypes = ['swipe', 'impersonate', 'continue'];
-        if (!noEmitTypes.includes(this.type)) {
-            eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
-            eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, this.messageId, this.type);
+        const emitMessageEvents = !['swipe', 'impersonate', 'continue'].includes(this.type);
+        if (emitMessageEvents) {
+            await eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
+        }
+        if (this.type !== 'impersonate' && this.messageId >= 0) {
+            await finalizeMessageContent(this.messageId, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, this.type);
         }
     }
 
@@ -4888,6 +4869,7 @@ class StreamingProcessor {
                 this.images = state?.images ?? [];
                 this.reasoningSignature = state?.signature ?? null;
                 this.native = state?.native ?? null;
+                this.promptCache = getPromptCacheUsage(state?.usage);
                 await eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, text);
                 sw.interval = getStreamingRenderInterval({
                     configuredFps: streamingFps,
@@ -4901,7 +4883,7 @@ class StreamingProcessor {
             // in the case of a self-inflicted abort, we have already cleaned up
             if (!this.isFinished) {
                 console.error(err);
-                this.onErrorStreaming();
+                await this.onErrorStreaming();
             }
             return this.result;
         }
@@ -5282,6 +5264,11 @@ function hideMessageBeforeRemoval(messageId) {
  * @property {boolean} [strict] If true, the schema will be used in strict mode, meaning that only the fields defined in the schema will be allowed.
  * @property {boolean} [returnInvalid] If true, a string that can't be parsed as a JSON will be returned as is, instead of an empty object.
  *
+ * @typedef {object} QuietToolRequest
+ * @property {string} prompt Literal control message, included in the context budget.
+ * @property {object} toolData Explicit tools for this request.
+ * @property {(data: unknown, signal: AbortSignal) => Promise<void>} onResponse Consumes the response before generation finishes.
+ *
  * @typedef {object} GenerateOptions
  * @property {boolean} [automatic_trigger] If the generation was triggered automatically (e.g. group auto mode).
  * @property {boolean} [force_name2] If a char name should be forced to add to the prompt's last line (Text Completion, non-Instruct only).
@@ -5298,6 +5285,7 @@ function hideMessageBeforeRemoval(messageId) {
  * @property {string|null} [agentProfileId] Agent profile to use when agentMode is active.
  * @property {{ initialChatHistoryMessages: number, includeActivatedWorldInfo: boolean }|null} [agentContextPolicy] Agent prompt context policy.
  * @property {string|null} [agentSystemPrompt] Resolved Agent system prompt to materialize through PromptManager.
+ * @property {QuietToolRequest|null} [quietToolRequest] Internal one-shot tool request without a chat tool turn.
  */
 
 const generationIdleGate = createGenerationIdleGate();
@@ -5411,7 +5399,7 @@ async function prepareLegacyMcpGenerationContext() {
     }
 }
 
-async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null, [LEGACY_MCP_GENERATION_CONTEXT]: inheritedLegacyMcpContext = null } = {}, dryRun = false) {
+async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, agentMode = false, agentProfileId = null, agentContextPolicy = null, agentSystemPrompt = null, quietToolRequest = null, [LEGACY_MCP_GENERATION_CONTEXT]: inheritedLegacyMcpContext = null } = {}, dryRun = false) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -5476,7 +5464,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     if (selected_group && !is_group_generating) {
         if (!dryRun) {
             // Returns the promise that generateGroupWrapper returns; resolves when generation is done
-            return generateGroupWrapper(false, type, { quiet_prompt, force_chid, signal: abortController.signal, quietImage, jsonSchema });
+            return generateGroupWrapper(false, type, { quiet_prompt, force_chid, signal: abortController.signal, quietImage, jsonSchema, quietToolRequest });
         }
 
         const characterIndexMap = new Map(characters.map((char, index) => [char.avatar, index]));
@@ -5614,7 +5602,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     let this_max_context = getMaxPromptTokens();
 
     // First message in fresh 1-on-1 chat reacts to user/character settings changes
-    if (chat.length) {
+    if (chat.length && !quietToolRequest) {
         chat[0].mes = substituteParams(chat[0].mes);
     }
 
@@ -6471,6 +6459,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 agentContextPolicy: resolvedAgentContextPolicy,
                 agentSystemPrompt: resolvedAgentSystemPrompt,
                 legacyMcpToolRound,
+                quietToolRequest,
             }, dryRun);
             toolData = evaluatedToolData;
             generate_data = { prompt: prompt };
@@ -6697,6 +6686,10 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             throw new Error(data?.response);
         }
 
+        if (quietToolRequest) {
+            return await quietToolRequest.onResponse(data, abortController.signal);
+        }
+
         if (jsonSchema) {
             unblockGeneration(type);
             return extractJsonFromData(data, {
@@ -6726,6 +6719,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             model: requestModel,
         });
         const native = data?.choices?.[0]?.message?.native ?? null;
+        const promptCache = getPromptCacheUsage(data?.usage);
         const hasToolCalls = canPerformToolCalls && ToolManager.hasToolCalls(data);
         kobold_horde_model = title;
 
@@ -6768,9 +6762,9 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         } else {
             // Without streaming we'll be having a full message on continuation. Treat it as a last chunk.
             if (originalType !== 'continue') {
-                ({ type, getMessage } = await saveReply({ type, getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, native, hasToolCalls }));
+                ({ type, getMessage } = await saveReply({ type, getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, native, promptCache, hasToolCalls }));
             } else {
-                ({ type, getMessage } = await saveReply({ type: 'appendFinal', getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, native, hasToolCalls }));
+                ({ type, getMessage } = await saveReply({ type: 'appendFinal', getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, native, promptCache, hasToolCalls }));
             }
             toolTurnOwner = chat.at(-1) ?? null;
 
@@ -6942,6 +6936,75 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
         generationIntent,
         options: { presentation: 'foreground' },
     });
+}
+
+export async function resumeAgentRunInChat({ runId, generationType, additionalRounds = 0, checkpoint, revisionGuidance, abortController: commandAbortController }) {
+    if (is_send_press || is_group_generating || hasActiveAgentRun()) {
+        throw new Error('agent.resume_generation_active: wait for the current generation to finish');
+    }
+    if (this_edit_mes_id === chat.length - 1) {
+        throw new Error('agent.resume_message_editing: finish editing the message before continuing');
+    }
+    setSendButtonState(true);
+    await enterGeneration(false);
+    try {
+        generation_started = new Date();
+        deactivateSendButtons();
+        await eventSource.emit(event_types.GENERATION_STARTED, generationType, { agentResume: true, runId }, false);
+        return await resumeAndWaitForAgentRun({ runId, additionalRounds, checkpoint, revisionGuidance }, commandAbortController);
+    } finally {
+        unblockGeneration(generationType);
+        await exitGeneration();
+    }
+}
+
+export async function reviseLegacyOutputInChat(guidance, commandAbortController) {
+    if (commandAbortController?.signal.aborted) return;
+    if (is_send_press || is_group_generating || hasActiveAgentRun()) {
+        throw new Error('output_revision.generation_active: wait for the current generation to finish');
+    }
+    if (main_api !== 'openai' || !ToolManager.supportsToolCalling()) {
+        throw new Error('output_revision.tools_required: select a Chat Completion model with tool calling');
+    }
+    if (online_status === 'no_connection') {
+        throw new Error('output_revision.connection_required: connect to a Chat Completion API before revising the reply');
+    }
+    if (this_edit_mes_id === chat.length - 1) {
+        throw new Error('output_revision.message_editing: finish editing the message before revising it');
+    }
+    const message = chat.at(-1);
+    const { mes: originalText, swipe_id: swipeId } = message;
+    const controller = new AbortController();
+    abortController = controller;
+    const cancel = () => stopGeneration();
+    commandAbortController?.addEventListener('abort', cancel);
+    setSendButtonState(true);
+    try {
+        await Generate('quiet', {
+            signal: controller.signal,
+            quietToolRequest: {
+                ...buildOutputRevisionRequest(originalText, guidance),
+                async onResponse(data, signal) {
+                    signal.throwIfAborted();
+                    const text = applyOutputPatches(originalText, ToolManager.getToolCallsFromData(data));
+                    const messageId = chat.length - 1;
+                    if (chat.at(-1) !== message || message.swipe_id !== swipeId
+                        || message.mes !== originalText || this_edit_mes_id === messageId) {
+                        throw new Error('output_revision.message_changed: the reply changed while the revision was being generated');
+                    }
+                    if (text === originalText) return;
+                    setMessageText(messageId, text);
+                    await eventSource.emit(event_types.MESSAGE_EDITED, messageId);
+                    updateMessageBlock(messageId, message);
+                    await finalizeMessageContent(messageId, event_types.MESSAGE_UPDATED);
+                    await saveChatConditional();
+                },
+            },
+        });
+    } finally {
+        commandAbortController?.removeEventListener('abort', cancel);
+        unblockGeneration('quiet');
+    }
 }
 
 async function prepareAgentPromptAssemblyForRun(input) {
@@ -7341,7 +7404,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
             await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
             await reloadCurrentChat();
         });
-        await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
+        await finalizeMessageContent(insertAt, event_types.USER_MESSAGE_RENDERED);
     } else {
         let chat_id;
         await withChatSurfaceStructureMutation(async () => {
@@ -7351,7 +7414,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
             await eventSource.emit(event_types.MESSAGE_SENT, chat_id);
             addOneMessage(message);
         });
-        await eventSource.emit(event_types.USER_MESSAGE_RENDERED, chat_id);
+        await finalizeMessageContent(chat_id, event_types.USER_MESSAGE_RENDERED);
     }
 
     return message;
@@ -8098,13 +8161,14 @@ async function processImageAttachment(message, { imageUrls }) {
  * @property {string[]} [imageUrls] Links to images
  * @property {string?} [reasoningSignature] Encrypted signature of the reasoning text
  * @property {any?} [native] Provider-native metadata that must be preserved across turns
+ * @property {{ input_tokens: number, cached_tokens: number }?} [promptCache] Prompt cache usage for this request
  * @property {boolean} [hasToolCalls] Whether the message owns tool calls
  *
  * @typedef {object} SaveReplyResult
  * @property {string} type Type of generation
  * @property {string} getMessage Generated message
  */
-export async function saveReply({ type, getMessage, fromStreaming = false, title = '', swipes = [], reasoning = '', imageUrls = [], reasoningSignature = null, native = null, hasToolCalls = false }) {
+export async function saveReply({ type, getMessage, fromStreaming = false, title = '', swipes = [], reasoning = '', imageUrls = [], reasoningSignature = null, native = null, promptCache = null, hasToolCalls = false }) {
     // Backward compatibility
     if (arguments.length > 1 && typeof arguments[0] !== 'object') {
         console.trace('saveReply called with positional arguments. Please use an object instead.');
@@ -8150,19 +8214,21 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
             lastMessage.extra.reasoning = reasoning;
             lastMessage.extra.reasoning_duration = null;
             lastMessage.extra.reasoning_signature = reasoningSignature;
+            lastMessage.extra.prompt_cache = promptCache ?? undefined;
+            delete lastMessage.extra.time_to_first_token;
             if (native !== null && native !== undefined) {
                 lastMessage.extra.native = native;
             }
             await processImageAttachment(lastMessage, { imageUrls });
-            if (power_user.message_token_count_enabled) {
+            if (shouldCountMessageTokens()) {
                 const tokenCountText = (reasoning || '') + lastMessage.mes;
                 lastMessage.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
             }
             const chat_id = (chat.length - 1);
             const emitMessageEvents = !fromStreaming && shouldEmitCharacterMessageEvents(chat[chat_id], hasToolCalls);
             emitMessageEvents && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-            addOneMessage(chat[chat_id], { type: 'swipe' });
-            emitMessageEvents && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
+            addOneMessage(chat[chat_id], { type: 'swipe', transient: fromStreaming });
+            if (!fromStreaming) await finalizeMessageContent(chat_id, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, type);
         } else {
             lastMessage.mes = getMessage;
         }
@@ -8179,19 +8245,21 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         lastMessage.extra.reasoning = reasoning;
         lastMessage.extra.reasoning_duration = null;
         lastMessage.extra.reasoning_signature = reasoningSignature;
+        lastMessage.extra.prompt_cache = promptCache ?? undefined;
+        delete lastMessage.extra.time_to_first_token;
         if (native !== null && native !== undefined) {
             lastMessage.extra.native = native;
         }
         await processImageAttachment(lastMessage, { imageUrls });
-        if (power_user.message_token_count_enabled) {
+        if (shouldCountMessageTokens()) {
             const tokenCountText = (reasoning || '') + lastMessage.mes;
             lastMessage.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
         }
         const chat_id = (chat.length - 1);
         const emitMessageEvents = !fromStreaming && shouldEmitCharacterMessageEvents(chat[chat_id], hasToolCalls);
         emitMessageEvents && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { type: 'swipe' });
-        emitMessageEvents && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
+        addOneMessage(chat[chat_id], { type: 'swipe', transient: fromStreaming });
+        if (!fromStreaming) await finalizeMessageContent(chat_id, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, type);
     } else if (type === 'appendFinal') {
         oldMessage = lastMessage.mes;
         console.debug('Trying to appendFinal.');
@@ -8204,20 +8272,22 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         lastMessage.extra.model = getGeneratingModel();
         lastMessage.extra.reasoning += reasoning;
         lastMessage.extra.reasoning_signature = reasoningSignature;
+        lastMessage.extra.prompt_cache = promptCache ?? undefined;
+        delete lastMessage.extra.time_to_first_token;
         if (native !== null && native !== undefined) {
             lastMessage.extra.native = native;
         }
         await processImageAttachment(lastMessage, { imageUrls });
         // We don't know if the reasoning duration extended, so we don't update it here on purpose.
-        if (power_user.message_token_count_enabled) {
+        if (shouldCountMessageTokens()) {
             const tokenCountText = (reasoning || '') + lastMessage.mes;
             lastMessage.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
         }
         const chat_id = (chat.length - 1);
         const emitMessageEvents = !fromStreaming && shouldEmitCharacterMessageEvents(chat[chat_id], hasToolCalls);
         emitMessageEvents && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-        addOneMessage(chat[chat_id], { type: 'swipe' });
-        emitMessageEvents && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
+        addOneMessage(chat[chat_id], { type: 'swipe', transient: fromStreaming });
+        if (!fromStreaming) await finalizeMessageContent(chat_id, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, type);
     } else {
         console.debug('entering chat update routine for non-swipe post');
         if (power_user.trim_spaces) {
@@ -8237,11 +8307,12 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
                 reasoning,
                 reasoning_duration: null,
                 reasoning_signature: reasoningSignature,
+                ...(promptCache ? { prompt_cache: promptCache } : {}),
                 ...(native !== null && native !== undefined ? { native } : {}),
             },
         };
 
-        if (power_user.message_token_count_enabled) {
+        if (shouldCountMessageTokens()) {
             const tokenCountText = (reasoning || '') + newMessage.mes;
             newMessage.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
         }
@@ -8263,9 +8334,9 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         await withChatSurfaceStructureMutation(async () => {
             chat.push(newMessage);
             emitMessageEvents && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
-            addOneMessage(chat[chat_id]);
+            addOneMessage(chat[chat_id], { transient: fromStreaming });
         });
-        emitMessageEvents && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
+        if (!fromStreaming) await finalizeMessageContent(chat_id, emitMessageEvents ? event_types.CHARACTER_MESSAGE_RENDERED : null, type);
     }
 
     const item = chat[chat.length - 1];
@@ -9425,7 +9496,7 @@ async function getChatResult({ allowNewChat = false } = {}) {
     if (chat.length === 1) {
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, 'first_message');
-        await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, 'first_message');
+        await finalizeMessageContent(chat_id, event_types.CHARACTER_MESSAGE_RENDERED, 'first_message');
     }
 }
 
@@ -9955,25 +10026,30 @@ function updateMessage(div) {
     if (bias) {
         text = removeMacros(text);
     }
-    if (mes.mes !== text) {
-        delete mes.extra.reasoning_signature;
-        delete mes.extra.native;
-    }
-    mes.mes = text;
-
     if (mes?.is_system || mes?.is_user || mes.extra?.type === system_message_types.NARRATOR) {
         mes.extra.bias = bias ?? null;
     } else {
         mes.extra.bias = null;
     }
 
-    chat_metadata.tainted = true;
-    if (mes.swipe_id !== undefined) {
-        ensureSwipes(mes);
-        syncMesToSwipe(this_edit_mes_id);
-    }
+    setMessageText(messageId, text);
 
     return { mesBlock, text, mes, bias };
+}
+
+function setMessageText(messageId, text) {
+    const message = chat[messageId];
+    message.extra ??= {};
+    if (message.mes !== text) {
+        delete message.extra.reasoning_signature;
+        delete message.extra.native;
+    }
+    message.mes = text;
+    chat_metadata.tainted = true;
+    if (message.swipe_id !== undefined) {
+        ensureSwipes(message);
+        syncMesToSwipe(messageId);
+    }
 }
 
 function openMessageDelete(fromSlashCommand) {
@@ -10090,7 +10166,6 @@ export async function messageEdit(editMessageId) {
  * @param {number} [messageId=this_edit_mes_id]
  */
 async function messageEditCancel(messageId = this_edit_mes_id) {
-    let text = chat[messageId].mes;
     let thisMesDiv;
     // If this is the button then select it's parent. Otherwise, select by messageId.
     if (this?.classList?.contains('mes_edit_cancel')) {
@@ -10105,16 +10180,7 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
 
     replaceMesTextHtmlWithRuntimePolicy(
         /** @type {HTMLElement} */ (thisMesDiv[0]),
-        getToolMessageHTML(chat[messageId], messageId)
-            ?? messageFormatting(
-                text,
-                this_edit_mes_chname,
-                chat[messageId].is_system,
-                chat[messageId].is_user,
-                messageId,
-                {},
-                false,
-            ),
+        getMessageTextHTML(chat[messageId], { messageId }),
     );
     appendMediaToMessage(chat[messageId], thisMesDiv);
 
@@ -10123,7 +10189,7 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
         reasoningEditDone.trigger('click');
     }
 
-    await eventSource.emit(event_types.MESSAGE_UPDATED, messageId);
+    await finalizeMessageContent(messageId, event_types.MESSAGE_UPDATED);
     if (messageId == this_edit_mes_id) {
         this_edit_mes_id = undefined;
         syncChatSurfaceProjectionHold();
@@ -10231,25 +10297,16 @@ async function messageEditDone(div) {
         return;
     }
 
-    let { mesBlock, text, mes, bias } = updateMessage(div);
+    const { mesBlock, bias } = updateMessage(div);
 
     await eventSource.emit(event_types.MESSAGE_EDITED, this_edit_mes_id);
-    text = chat[this_edit_mes_id]?.mes ?? text;
+    const mes = chat[this_edit_mes_id];
     mesBlock.find('.mes_edit_buttons').css('display', 'none');
     mesBlock.find('.mes_buttons').css('display', '');
 
     replaceMesTextHtmlWithRuntimePolicy(
         /** @type {HTMLElement} */ (div.closest('.mes')[0]),
-        getToolMessageHTML(mes, this_edit_mes_id)
-            ?? messageFormatting(
-                text,
-                this_edit_mes_chname,
-                mes.is_system,
-                mes.is_user,
-                this_edit_mes_id,
-                {},
-                false,
-            ),
+        getMessageTextHTML(mes, { messageId: this_edit_mes_id }),
     );
     mesBlock.find('.mes_bias').empty();
     mesBlock.find('.mes_bias').append(messageFormatting(bias, '', false, false, -1, {}, false));
@@ -10260,7 +10317,7 @@ async function messageEditDone(div) {
         reasoningEditDone.trigger('click');
     }
 
-    await eventSource.emit(event_types.MESSAGE_UPDATED, this_edit_mes_id);
+    await finalizeMessageContent(this_edit_mes_id, event_types.MESSAGE_UPDATED);
     this_edit_mes_id = undefined;
     syncChatSurfaceProjectionHold();
     await saveChatConditional();
@@ -11912,7 +11969,7 @@ export async function createOrEditCharacter(e) {
                     await clearChat();
                     await printMessages();
                 });
-                await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, 'first_message');
+                await finalizeMessageContent(messageId, event_types.CHARACTER_MESSAGE_RENDERED, 'first_message');
                 await saveChatConditional();
             }
         } catch (error) {
@@ -12272,6 +12329,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
             // resets the timer
             thisMesDiv.find('.mes_timer').html('');
             thisMesDiv.find('.tokenCounterDisplay').text('');
+            thisMesDiv.find('.mes_generation_info').empty();
             updateReasoningUI(thisMesDiv, { reset: true });
         } else {
             //console.log('showing previously generated swipe candidate, or "..."');
@@ -12281,8 +12339,9 @@ export async function swipe(event, direction, { source, repeated, message = chat
             const scroll = (mesId == chat.length - 1);
             //The swipe buttons will be refreshed in endSwipe(), refreshing them now will cause flickering.
             addOneMessage(chat[mesId], { type: 'swipe', forceId: mesId, scroll: scroll, showSwipes: false });
+            await finalizeMessageContent(mesId);
 
-            if (power_user.message_token_count_enabled) {
+            if (shouldCountMessageTokens()) {
                 if (!chat[mesId].extra) {
                     chat[mesId].extra = {};
                 }
@@ -12291,6 +12350,8 @@ export async function swipe(event, direction, { source, repeated, message = chat
                 const tokenCount = await getTokenCountAsync(tokenCountText, 0);
                 chat[mesId].extra.token_count = tokenCount;
                 thisMesDiv.find('.tokenCounterDisplay').text(`${tokenCount}t`);
+                const { tokenRate } = formatGenerationTimer(chat[mesId].gen_started, chat[mesId].gen_finished, tokenCount);
+                updateMessageGenerationInfo(thisMesDiv[0], chat[mesId], tokenRate);
             }
         }
 
@@ -12512,7 +12573,7 @@ export async function processDroppedFiles(files, data = new Map(), { replacement
 
         for (const avatarFileName of replacements) {
             try {
-                await resolveImportedCharacterLorebookConflict(avatarFileName);
+                await resolveCharacterLorebookConflict(avatarFileName);
             } catch (error) {
                 console.warn('Character replaced, but its World/Lorebook conflict could not be resolved:', error);
                 toastr.warning(error?.message, t`Character replaced; World/Lorebook follow-up failed`);
@@ -12807,11 +12868,14 @@ async function applyCharacterLorebookConflictResolution(avatarFileName, resoluti
     }
 }
 
-async function resolveImportedCharacterLorebookConflict(avatarFileName) {
+/**
+ * @returns {Promise<boolean>} Whether the conflict is resolved; false when deferred.
+ */
+async function resolveCharacterLorebookConflict(avatarFileName) {
     while (true) {
         const conflict = await getCharacterLorebookConflict(avatarFileName);
         if (!conflict?.conflict) {
-            return;
+            return true;
         }
 
         const conflictToken = String(conflict.conflict_token || '');
@@ -12821,44 +12885,39 @@ async function resolveImportedCharacterLorebookConflict(avatarFileName) {
         const currentWorldLabel = worldName
             ? `<code>${escapeHtml(worldName)}</code>`
             : `<code>${t`missing`}</code>`;
-        const unavailableMessage = currentAvailable
-            ? ''
-            : `<div>${t`The current local World/Lorebook is missing. Saving a copy will not bind it automatically.`}</div>`;
-        const keepCurrentMessage = currentAvailable
-            ? `<div>${t`Keeping the current version replaces the card's embedded copy with the local version.`}</div>`
-            : '';
+        const resolutionMessage = currentAvailable
+            ? `<div>${t`Using the embedded version overwrites the local World/Lorebook and may affect other characters.`}</div>
+               <div>${t`Saving a copy keeps the current link and stores the embedded version separately.`}</div>
+               <div>${t`Keeping the current version replaces the card's embedded copy with the local version.`}</div>`
+            : `<div>${t`The linked local World/Lorebook is missing. Use the embedded version to restore it, or save an unbound copy.`}</div>`;
         const popupBody = `
             <div>${t`The card's embedded World/Lorebook differs from the linked local version.`}</div>
             <div class="m-t-1">${t`Current local World/Lorebook:`} ${currentWorldLabel}</div>
             <div>${t`Embedded World/Lorebook:`} <code>${escapeHtml(embeddedName)}</code></div>
-            <div class="m-t-1">${t`Using the new version overwrites the local World/Lorebook and may affect other characters.`}</div>
-            <div>${t`Saving a copy keeps the current link and stores the new version separately.`}</div>
-            ${keepCurrentMessage}
-            ${unavailableMessage}
+            <div class="m-t-1">${resolutionMessage}</div>
         `;
         const customButtons = [
             {
-                text: t`Use New`,
+                text: t`Use Embedded`,
                 result: POPUP_RESULT.CUSTOM1,
             },
             {
-                text: t`Keep Both`,
+                text: currentAvailable ? t`Keep Both` : t`Save a Copy`,
                 result: POPUP_RESULT.CUSTOM2,
             },
         ];
         if (currentAvailable) {
             customButtons.push({
-                text: t`Keep Current`,
+                text: t`Keep Local`,
                 result: POPUP_RESULT.CUSTOM3,
             });
         }
 
         const result = await Popup.show.confirm(t`World/Lorebook conflict`, popupBody, {
             okButton: false,
-            cancelButton: false,
+            cancelButton: t`Not Now`,
             customButtons,
             defaultResult: currentAvailable ? POPUP_RESULT.CUSTOM2 : POPUP_RESULT.CUSTOM1,
-            allowEscapeClose: false,
         });
         const resolution = {
             [POPUP_RESULT.CUSTOM1]: 'embedded',
@@ -12866,7 +12925,7 @@ async function resolveImportedCharacterLorebookConflict(avatarFileName) {
             [POPUP_RESULT.CUSTOM3]: 'current',
         }[result];
         if (!resolution) {
-            throw new Error(t`World/Lorebook choice was cancelled.`);
+            return false;
         }
 
         try {
@@ -12875,7 +12934,7 @@ async function resolveImportedCharacterLorebookConflict(avatarFileName) {
                 resolution,
                 conflictToken,
             );
-            return;
+            return true;
         } catch (error) {
             if (error?.status === 409) {
                 continue;
@@ -12897,81 +12956,7 @@ async function resolveCharacterLorebookConflictBeforeNewChat() {
 
     try {
         await flushWorldInfoSaves('new_chat_lorebook_conflict_check');
-        while (true) {
-            const conflict = await getCharacterLorebookConflict(character.avatar);
-
-            if (!conflict?.conflict) {
-                return true;
-            }
-
-            const conflictToken = String(conflict.conflict_token || '');
-            const worldName = String(conflict.world || character?.data?.extensions?.world || '');
-            const embeddedName = String(conflict.embedded_name || t`Embedded World/Lorebook`);
-            const currentAvailable = Boolean(conflict.current_available);
-            const currentWorldLabel = worldName ? `<code>${escapeHtml(worldName)}</code>` : `<code>${t`missing`}</code>`;
-            const embeddedWorldLabel = `<code>${escapeHtml(embeddedName)}</code>`;
-            const unavailableMessage = currentAvailable
-                ? ''
-                : `<div class="m-t-1">${t`The linked local World/Lorebook file is missing. You can restore it from the embedded copy or cancel.`}</div>`;
-
-            const popupBody = `
-                <div>${t`The embedded World/Lorebook and linked local World/Lorebook are different.`}</div>
-                <div class="m-t-1">${t`Current local World/Lorebook:`} ${currentWorldLabel}</div>
-                <div>${t`Embedded World/Lorebook:`} ${embeddedWorldLabel}</div>
-                ${unavailableMessage}
-                <div class="m-t-1">${t`Choose which version to keep before starting a new chat. The other version will be overwritten.`}</div>
-            `;
-            const customButtons = [];
-
-            if (currentAvailable) {
-                customButtons.push({
-                    text: t`Save current World/Lorebook`,
-                    result: POPUP_RESULT.CUSTOM1,
-                });
-            }
-
-            customButtons.push(
-                {
-                    text: t`Overwrite with embedded World/Lorebook`,
-                    result: POPUP_RESULT.CUSTOM2,
-                },
-                {
-                    text: translate('Cancel', 'Cancel World/Lorebook conflict'),
-                    result: POPUP_RESULT.NEGATIVE,
-                },
-            );
-
-            const result = await Popup.show.confirm(t`World/Lorebook conflict`, popupBody, {
-                okButton: false,
-                cancelButton: false,
-                customButtons,
-                defaultResult: currentAvailable ? POPUP_RESULT.CUSTOM1 : POPUP_RESULT.CUSTOM2,
-            });
-
-            const resolution = result === POPUP_RESULT.CUSTOM1
-                ? 'current'
-                : result === POPUP_RESULT.CUSTOM2
-                    ? 'embedded'
-                    : '';
-
-            if (!resolution) {
-                return false;
-            }
-
-            try {
-                await applyCharacterLorebookConflictResolution(
-                    character.avatar,
-                    resolution,
-                    conflictToken,
-                );
-                return true;
-            } catch (error) {
-                if (error?.status === 409) {
-                    continue;
-                }
-                throw error;
-            }
-        }
+        return await resolveCharacterLorebookConflict(character.avatar);
     } catch (error) {
         console.error('Failed to resolve character lorebook conflict before new chat.', error);
         toastr.error(error?.message || t`Failed to resolve the World/Lorebook conflict.`, t`New chat cancelled`);

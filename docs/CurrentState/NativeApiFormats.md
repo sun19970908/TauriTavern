@@ -92,6 +92,8 @@ Connection Profiles（Connection Manager 扩展）：
 
 ### 4.0 OpenAI-compatible（/chat/completions）
 
+- 共享 Chat Completions builder 为流式请求设置 `stream_options.include_usage=true`；现有 additional body overrides 仍可覆盖或删除该字段。usage 尾包可以没有 choices，必须消费到正常结束。
+- Claude、Gemini、Responses 与 Interactions 的 normalizer 将缓存读取数保留为 `usage.prompt_tokens_details.cached_tokens`，缺失时不补零；Claude 的 `prompt_tokens` 包含缓存读取、缓存写入和未缓存输入。Responses/Interactions 的现有流式终包携带相同 usage。
 - 第一方 UI 的 Reasoning Effort `Auto` 表示不生成 `reasoning_effort`；其他显式值由 Custom payload 原样发送，不按模型名启用、校验或降级。上游不接受时沿现有错误链路返回，用户仍可通过 include/exclude body override 最终覆盖或删除该字段。
 - assistant tool call 的 `extra_content` 是 provider-owned opaque JSON；Legacy 与 Agent 都按原 tool call 位置保存，并在同 API/model 的后续工具请求中原样回放。
 - 前端不解析其中的 provider namespace 或 signature，不按模型名启用，也不生成缺失值。
@@ -133,7 +135,7 @@ Connection Profiles（Connection Manager 扩展）：
 tool follow-up（关键契约）：
 - 普通 Custom Responses 不再依赖 repository 内存缓存。若没有 `previous_response_id`，请求必须通过 full transcript replay 或 native output replay 提供前置 `function_call`。
 - 若 payload 已有 `previous_response_id`，builder 允许只发送对应的 `function_call_output`。
-- portable Agent Responses follow-up 使用 full transcript/native output replay；显式启用 WebSocket 模式后才由 `AgentModelGateway` 的 `provider_state.previousResponseId` 驱动。详见 `docs/CurrentState/AgentProviderState.md`。
+- portable Agent Responses follow-up 使用 full transcript/native output replay；显式启用 WebSocket 模式后才由 `AgentModelGateway` 的 `provider_state.previousResponseId` 驱动。详见 [Agent LLM gateway](../Agent/LlmGateway.md#续接状态)。
 
 ### 4.2 Gemini Interactions（/v1beta/interactions）
 

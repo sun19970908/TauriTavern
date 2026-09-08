@@ -106,7 +106,7 @@ type TauriTavernAgentRunEvent = {
     payload?: unknown;
 };
 
-type TauriTavernAgentInvocationKind = 'root' | 'subagent' | 'handoff';
+type TauriTavernAgentInvocationKind = 'root' | 'subagent' | 'handoff' | 'revision';
 
 type TauriTavernAgentInvocationStatus =
     | 'created'
@@ -147,6 +147,29 @@ type TauriTavernAgentRunTimelineDelegationEdge = {
     updatedAt: string;
 };
 
+type TauriTavernAgentTaskDetail = {
+    runId: string;
+    taskId: string;
+    parentInvocationId: string;
+    childInvocationId: string;
+    targetProfileId: string;
+    workspaceKey: string;
+    continuation: 'return_to_parent' | 'transfer_control';
+    status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+    task: {
+        objective: string;
+        title?: string;
+        [key: string]: unknown;
+    };
+    resultRef: string | null;
+    result: {
+        summary: string;
+        summaryRef: string | null;
+        output: Record<string, unknown>;
+    } | null;
+    error: string | null;
+};
+
 type TauriTavernAgentRunTimelineProjection = {
     foregroundInvocationIds: string[];
     invocations: TauriTavernAgentRunTimelineInvocation[];
@@ -159,6 +182,17 @@ type TauriTavernAgentRunHandle = {
     stableChatId: string;
     generationType: string;
     status: TauriTavernAgentRunStatus;
+    afterSeq?: number;
+};
+
+type TauriTavernAgentRunCheckpoint = {
+    run: TauriTavernAgentRunHandle;
+    terminalSeq: number;
+    presentation: Record<string, any> | null;
+    nextStep: 'model' | 'tools' | 'handoff' | 'finalize' | 'finished' | 'unavailable';
+    round: number;
+    maxRounds: number;
+    blockedReason: string | null;
 };
 
 type TauriTavernAgentRunLiveToolCall =
@@ -183,8 +217,18 @@ type TauriTavernAgentRunLiveToolCall =
         newStringWords: number;
     };
 
+type TauriTavernAgentRunLiveReasoning = {
+    invocationId: string;
+    invocationExitPolicy: TauriTavernAgentInvocationExitPolicy;
+    text: string;
+    toolIds: string[];
+};
+
 type TauriTavernAgentRunLiveUpdate =
-    | { type: 'snapshot'; calls: TauriTavernAgentRunLiveToolCall[] }
+    | { type: 'reasoningReplace'; reasoning: TauriTavernAgentRunLiveReasoning }
+    | { type: 'reasoningAppend'; invocationId: string; text: string; toolIds: string[] }
+    | { type: 'reasoningRemove'; invocationId: string }
+    | { type: 'snapshot'; calls: TauriTavernAgentRunLiveToolCall[]; reasoning: TauriTavernAgentRunLiveReasoning[] }
     | {
         type: 'append';
         invocationId: string;
@@ -589,6 +633,8 @@ type TauriTavernAgentRetentionApi = {
 };
 
 type TauriTavernAgentApi = {
+    readCheckpoint: (runId: string) => Promise<TauriTavernAgentRunCheckpoint>;
+    resume: (input: { runId: string; additionalRounds?: number; checkpoint?: TauriTavernAgentRunCheckpoint; revisionGuidance?: string }) => Promise<TauriTavernAgentRunHandle>;
     startRunWithPromptSnapshot: (input: {
         chatRef: TauriTavernChatRef;
         stableChatId?: string;
@@ -598,7 +644,7 @@ type TauriTavernAgentApi = {
         frozenRunInputSnapshot?: any;
         generationIntent?: any;
         presentation?: TauriTavernAgentRunPresentation;
-        options?: { presentation?: TauriTavernAgentRunPresentation; stream?: boolean };
+        options?: { presentation?: TauriTavernAgentRunPresentation; stream?: boolean; startWithEmptyPersist?: boolean };
     }) => Promise<TauriTavernAgentRunHandle>;
     startRunFromLegacyGenerate: (input?: {
         chatRef?: TauriTavernChatRef;
@@ -608,7 +654,7 @@ type TauriTavernAgentApi = {
         profileId?: string | null;
         generationIntent?: any;
         presentation?: TauriTavernAgentRunPresentation;
-        options?: { presentation?: TauriTavernAgentRunPresentation; stream?: boolean };
+        options?: { presentation?: TauriTavernAgentRunPresentation; stream?: boolean; startWithEmptyPersist?: boolean };
     }) => Promise<TauriTavernAgentRunHandle>;
     cancel: (runId: string) => Promise<TauriTavernAgentRunHandle>;
     submitGuidance: (input: {
@@ -637,6 +683,11 @@ type TauriTavernAgentApi = {
         round: number;
         maxChars?: number;
     }) => Promise<TauriTavernAgentModelTurn>;
+    readTaskDetail: (input: {
+        runId: string;
+        taskId: string;
+        includeResult?: boolean;
+    }) => Promise<TauriTavernAgentTaskDetail>;
     subscribe: (
         runId: string,
         handler: (event: TauriTavernAgentRunEvent) => void,
@@ -647,7 +698,7 @@ type TauriTavernAgentApi = {
         handler: (update: TauriTavernAgentRunLiveUpdate) => void,
         options?: { onError?: (error: unknown) => void },
     ) => TauriTavernHostUnsubscribe;
-    settleChatPresentation: (handle: TauriTavernAgentRunHandle) => Promise<void>;
+    settleChatPresentation: (handle: Pick<TauriTavernAgentRunHandle, 'runId'>) => Promise<void>;
     profiles: TauriTavernAgentProfilesApi;
     tools: TauriTavernAgentToolsApi;
     promptAssembly: TauriTavernAgentPromptAssemblyApi;
@@ -688,7 +739,7 @@ type TauriTavernLlmConnectionDefinition = {
         sourceSpecific?: Record<string, any>;
     };
     auth: {
-        secretRef: {
+        secretRef?: {
             key: string;
             id: string;
             labelSnapshot?: string;
@@ -697,6 +748,8 @@ type TauriTavernLlmConnectionDefinition = {
     routing?: {
         reverseProxy?: {
             url: string;
+        } | {
+            preset: string;
         };
     };
     adapterHints?: {
@@ -1178,12 +1231,23 @@ type TauriTavernChatSurfaceRegistration = {
     fault: (error: unknown) => void;
 };
 
+type TauriTavernChatSurfaceContentProcessor = {
+    id: string;
+    prepare: (
+        context: { readonly message: ChatMessage; readonly mesid: number; readonly signal: AbortSignal },
+        renderBase: () => Promise<string>,
+    ) => string | Promise<string>;
+};
+
 type TauriTavernChatSurfaceApi = {
     readonly protocolVersion: 1;
     isManagedOwnershipRequired: () => boolean;
     registerParticipant: (
         participant: TauriTavernChatSurfaceParticipant,
     ) => TauriTavernChatSurfaceRegistration;
+    registerContentProcessor: (
+        processor: TauriTavernChatSurfaceContentProcessor,
+    ) => { refresh: () => Promise<void> };
 };
 
 type TauriTavernHostApi = {
