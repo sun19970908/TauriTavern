@@ -115,12 +115,25 @@ export {
     executeSlashCommands, executeSlashCommandsWithOptions, getSlashCommandsHelp, registerSlashCommand,
 };
 
-export const parser = new SlashCommandParser();
+let _parserInstance = null;
+function getParserInstance() {
+    return _parserInstance ??= new SlashCommandParser();
+}
+// Lazy proxy: defer SlashCommandParser construction until first property access.
+// This sidesteps the "Cannot access 'SlashCommand' before initialization" TDZ that
+// fires when the parser is constructed at module-evaluation time inside the
+// script.js <-> slash-commands.js import cycle on some WebView implementations.
+const parser = new Proxy({}, {
+    get(_target, prop) {
+        return Reflect.get(getParserInstance(), prop);
+    },
+});
+export { parser };
 /**
  * @deprecated Use SlashCommandParser.addCommandObject() instead
  */
 const registerSlashCommand = SlashCommandParser.addCommand.bind(SlashCommandParser);
-const getSlashCommandsHelp = parser.getHelpString.bind(parser);
+const getSlashCommandsHelp = () => getParserInstance().getHelpString();
 
 /**
  * Converts a SlashCommandClosure to a filter function that returns a boolean.
