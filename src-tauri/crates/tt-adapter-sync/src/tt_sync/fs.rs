@@ -133,6 +133,12 @@ fn scan_dir_recursive(
 }
 
 fn ensure_agent_run_is_terminal(path: &Path) -> Result<(), DomainError> {
+    if !path.exists() {
+        // Orphan run directory (run.json never landed, typically an aborted
+        // run): not registered in the agent run index, so dropping it from
+        // the manifest is consistent with how the run is referenced.
+        return Ok(());
+    }
     let text = std::fs::read_to_string(path).map_err(|error| {
         DomainError::InternalError(format!(
             "Failed to read agent run {}: {}",
