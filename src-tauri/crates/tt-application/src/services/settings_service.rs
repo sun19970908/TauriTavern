@@ -766,16 +766,22 @@ impl SettingsService {
             .settings_repository
             .get_sillytavern_settings_signature()
             .await?;
-        let mut cache = self.sillytavern_settings_cache.lock().await;
-        if let Some(entry) = cache.as_ref()
-            && entry.signature == signature
         {
-            tracing::debug!("Using cached SillyTavern settings aggregate");
-            return Ok(entry.response.clone());
+            let cache = self.sillytavern_settings_cache.lock().await;
+            if let Some(entry) = cache.as_ref()
+                && entry.signature == signature
+            {
+                tracing::debug!("Using cached SillyTavern settings aggregate");
+                return Ok(entry.response.clone());
+            }
         }
 
+        // [SETTINGS-409-20260910] 必须先释放 cache 锁再 build：
+        // build 内部要拿 user_settings_save_lock（见 build_sillytavern_settings_response），
+        // 而保存路径的锁序是 save_lock -> cache（persist_user_settings 里清缓存）。
+        // 若这里持有 cache 锁去等 save_lock，就会和保存路径形成 cache -> save / save -> cache 的锁序反转并死锁。
         let response = self.build_sillytavern_settings_response().await?;
-        *cache = Some(SettingsAggregateCacheEntry {
+        *self.sillytavern_settings_cache.lock().await = Some(SettingsAggregateCacheEntry {
             signature,
             response: response.clone(),
         });
@@ -787,6 +793,11 @@ impl SettingsService {
         &self,
     ) -> Result<SillyTavernSettingsResponseDto, ApplicationError> {
         let settings_json = async {
+            // [SETTINGS-409-20260910] 与保存互斥后再读盘、算 hash、算 revision：
+            // 刷新时旧页面可能正在写盘（settings.json 24MB 级写 2~3s），若 GET 在写入前读到旧内容，
+            // 返回给新页面的基线 hash 就是过期的，之后新页面每次 patch 保存都会被判 409 而永久无法保存。
+            // 拿锁后：要么读到保存前的完整旧状态，要么等到保存完成后读到完整新状态，不会读到写入中的中间态。
+            let _save_guard = self.user_settings_save_lock.lock().await;
             let mut user_settings = self.settings_repository.load_user_settings().await?;
             let repair_report = repair_sillytavern_prompt_manager_settings(&mut user_settings);
             let repaired = repair_report.changed();
