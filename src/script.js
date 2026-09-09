@@ -838,6 +838,7 @@ let settingsSavePending = false;
 let pendingSettingsLoopCounter = 0;
 let settingsSavePromise = null;
 let settingsSaveQueued = false;
+let settingsConflictRecovering = false;
 const scheduleSettingsSave = debounce((loopCounter = 0) => {
     settingsSavePending = false;
     return saveSettings(loopCounter);
@@ -9957,6 +9958,23 @@ async function saveSettingsNow(loopCounter = 0) {
     } catch (error) {
         console.error('Error saving settings:', error);
         if (isSettingsPatchConflictError(error)) {
+            // The on-disk settings advanced past our baseline (e.g. another save
+            // finished after a reload). Re-sync the baseline from the backend and
+            // retry once so a stale baseline can't wedge every future save.
+            if (!settingsConflictRecovering) {
+                settingsConflictRecovering = true;
+                try {
+                    await getSettings();
+                    const retried = await saveSettingsNow(loopCounter);
+                    if (retried) {
+                        return true;
+                    }
+                } catch {
+                    // fall through to the toast
+                } finally {
+                    settingsConflictRecovering = false;
+                }
+            }
             toastr.error(t`Settings changed outside this page. Reload before saving again to prevent data loss.`, t`Settings could not be saved`);
         } else {
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Settings could not be saved`);
