@@ -35,6 +35,7 @@ const CUSTOM_API_FORMAT_BY_API = Object.freeze({
     custom_openai_responses: 'openai_responses',
     custom_claude_messages: 'claude_messages',
     custom_gemini_interactions: 'gemini_interactions',
+    custom_gemini_generate_content: 'gemini_generate_content',
 });
 
 /** @type {Readonly<Record<string, string>>} */
@@ -150,7 +151,7 @@ export function buildLlmConnectionFromModelTarget(target) {
         endpoint.sourceSpecific[SOURCE_SPECIFIC_API_URL_KEYS[source]] = apiUrl;
     }
 
-    if (source === 'vertexai' && target.secretRef?.key === 'api_key_vertexai_service_account') {
+    if (source === 'vertexai' && target.secretRef?.key === 'vertexai_service_account_json') {
         endpoint.sourceSpecific.vertexai_auth_mode = 'full';
     }
 
