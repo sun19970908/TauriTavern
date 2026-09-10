@@ -148,6 +148,7 @@ const max_128k = 128 * 1000;
 const max_200k = 200 * 1000;
 const max_256k = 256 * 1000;
 const max_400k = 400 * 1000;
+const max_500k = 500 * 1000;
 const max_1mil = 1000 * 1000;
 const max_2mil = 2000 * 1000;
 const unlocked_max = max_2mil;
@@ -386,6 +387,11 @@ export const MOONSHOT_ENDPOINT = {
     CN: 'cn',
 };
 
+export const POLLINATIONS_ENDPOINT = {
+    AUTHENTICATED: 'authenticated',
+    ANONYMOUS: 'anonymous',
+};
+
 export const AWS_BEDROCK_REGION_DEFAULT = 'us-east-1';
 
 export function getAwsBedrockModelMetadata(modelId = null) {
@@ -511,6 +517,7 @@ export const settingsToUpdate = {
     aimlapi_model: ['#model_aimlapi_select', 'aimlapi_model', false, true],
     xai_model: ['#model_xai_select', 'xai_model', false, true],
     pollinations_model: ['#model_pollinations_select', 'pollinations_model', false, true],
+    pollinations_endpoint: ['#pollinations_endpoint', 'pollinations_endpoint', false, true],
     moonshot_model: ['#model_moonshot_select', 'moonshot_model', false, true],
     moonshot_endpoint: ['#moonshot_endpoint', 'moonshot_endpoint', false, true],
     fireworks_model: ['#model_fireworks_select', 'fireworks_model', false, true],
@@ -641,10 +648,11 @@ const default_settings = {
     nanogpt_model: 'gpt-4o-mini',
     nanogpt_provider: '',
     nanogpt_payg_override: false,
-    deepseek_model: 'deepseek-v4-flash',
+    deepseek_model: 'deepseek-flash',
     aimlapi_model: 'chatgpt-4o-latest',
-    xai_model: 'grok-3-beta',
+    xai_model: 'grok-4.6',
     pollinations_model: 'openai',
+    pollinations_endpoint: POLLINATIONS_ENDPOINT.AUTHENTICATED,
     cometapi_model: 'gpt-4o',
     moonshot_model: 'kimi-k3',
     moonshot_endpoint: MOONSHOT_ENDPOINT.GLOBAL,
@@ -4531,23 +4539,18 @@ export async function createGenerationParameters(settings, model, type, messages
     }
 
     if (settings.chat_completion_source === chat_completion_sources.XAI) {
-        if (model.includes('grok-3-mini')) {
-            delete generate_data.presence_penalty;
-            delete generate_data.frequency_penalty;
+        // As of 2026-09-10, no Grok model accepts penalties, only the
+        // non-reasoning variants accept stop, and only Grok 4.3 and newer
+        // accept reasoning_effort.
+        delete generate_data.presence_penalty;
+        delete generate_data.frequency_penalty;
+
+        if (!model.includes('non-reasoning')) {
             delete generate_data.stop;
-        } else {
-            // As of 2025/09/21, only grok-3-mini accepts reasoning_effort
-            delete generate_data.reasoning_effort;
         }
 
-        if (model.includes('grok-4') || model.includes('grok-code')) {
-            delete generate_data.presence_penalty;
-            delete generate_data.frequency_penalty;
-
-            // grok-4-fast-non-reasoning accepts stop
-            if (!model.includes('grok-4-fast-non-reasoning')) {
-                delete generate_data.stop;
-            }
+        if (!['grok-4.3', 'grok-4.5', 'grok-4.6'].some(x => model.includes(x))) {
+            delete generate_data.reasoning_effort;
         }
     }
 
@@ -4574,6 +4577,10 @@ export async function createGenerationParameters(settings, model, type, messages
 
     if (settings.chat_completion_source === chat_completion_sources.SILICONFLOW) {
         generate_data.siliconflow_endpoint = settings.siliconflow_endpoint || SILICONFLOW_ENDPOINT.GLOBAL;
+    }
+
+    if (settings.chat_completion_source === chat_completion_sources.POLLINATIONS) {
+        generate_data.pollinations_endpoint = settings.pollinations_endpoint || POLLINATIONS_ENDPOINT.AUTHENTICATED;
     }
 
     if (settings.chat_completion_source === chat_completion_sources.AWS_BEDROCK) {
@@ -6393,6 +6400,10 @@ async function getStatusOpen() {
         data.moonshot_endpoint = oai_settings.moonshot_endpoint;
     }
 
+    if (oai_settings.chat_completion_source === chat_completion_sources.POLLINATIONS) {
+        data.pollinations_endpoint = oai_settings.pollinations_endpoint;
+    }
+
     if (oai_settings.chat_completion_source === chat_completion_sources.AWS_BEDROCK) {
         data.aws_bedrock_region = (oai_settings.aws_bedrock_region || AWS_BEDROCK_REGION_DEFAULT).trim();
     }
@@ -7796,7 +7807,7 @@ async function onModelChange() {
     if (oai_settings.chat_completion_source === chat_completion_sources.DEEPSEEK) {
         if (oai_settings.max_context_unlocked) {
             $('#openai_max_context').attr('max', unlocked_max);
-        } else if (['deepseek-chat', 'deepseek-reasoner'].includes(oai_settings.deepseek_model) || oai_settings.deepseek_model.startsWith('deepseek-v4')) {
+        } else if (['deepseek-chat', 'deepseek-reasoner', 'deepseek-flash'].includes(oai_settings.deepseek_model) || oai_settings.deepseek_model.startsWith('deepseek-v4')) {
             $('#openai_max_context').attr('max', max_1mil);
         } else if (oai_settings.deepseek_model == 'deepseek-coder') {
             $('#openai_max_context').attr('max', max_16k);
@@ -7827,17 +7838,12 @@ async function onModelChange() {
     if (oai_settings.chat_completion_source === chat_completion_sources.XAI) {
         if (oai_settings.max_context_unlocked) {
             $('#openai_max_context').attr('max', unlocked_max);
-        } else if (oai_settings.xai_model.includes('grok-2-vision')) {
-            $('#openai_max_context').attr('max', max_32k);
-        } else if (oai_settings.xai_model.includes('grok-4-fast')) {
-            $('#openai_max_context').attr('max', max_2mil);
-        } else if (oai_settings.xai_model.includes('grok-4')) {
-            $('#openai_max_context').attr('max', max_256k);
-        } else if (oai_settings.xai_model.includes('grok-code')) {
+        } else if (['grok-4.5', 'grok-4.6'].some(x => oai_settings.xai_model.includes(x))) {
+            $('#openai_max_context').attr('max', max_500k);
+        } else if (['grok-build', 'grok-code'].some(x => oai_settings.xai_model.includes(x))) {
             $('#openai_max_context').attr('max', max_256k);
         } else {
-            // grok 2 and grok 3
-            $('#openai_max_context').attr('max', max_128k);
+            $('#openai_max_context').attr('max', max_1mil);
         }
 
         oai_settings.openai_max_context = Math.min(Number($('#openai_max_context').attr('max')), oai_settings.openai_max_context);
@@ -8004,7 +8010,7 @@ async function onConnectButtonClick(e) {
         [chat_completion_sources.AZURE_OPENAI]: { key: SECRET_KEYS.AZURE_OPENAI, selector: '#api_key_azure_openai', proxy: false },
         [chat_completion_sources.ZAI]: { key: SECRET_KEYS.ZAI, selector: '#api_key_zai', proxy: true },
         [chat_completion_sources.CHUTES]: { key: SECRET_KEYS.CHUTES, selector: '#api_key_chutes', proxy: false },
-        [chat_completion_sources.POLLINATIONS]: { key: SECRET_KEYS.POLLINATIONS, selector: '#api_key_pollinations', proxy: false },
+        [chat_completion_sources.POLLINATIONS]: { key: SECRET_KEYS.POLLINATIONS, selector: '#api_key_pollinations', proxy: false, keyless: oai_settings.pollinations_endpoint === POLLINATIONS_ENDPOINT.ANONYMOUS },
         [chat_completion_sources.WORKERS_AI]: { key: SECRET_KEYS.WORKERS_AI, selector: '#api_key_workers_ai', proxy: false },
         [chat_completion_sources.MINIMAX]: { key: SECRET_KEYS.MINIMAX, selector: '#api_key_minimax', proxy: false },
         [chat_completion_sources.AWS_BEDROCK]: { key: SECRET_KEYS.AWS_BEDROCK, selector: '#api_key_aws_bedrock', proxy: false },
@@ -8124,6 +8130,7 @@ function toggleChatCompletionForms() {
         $('#model_xai_select').trigger('change');
     }
     else if (oai_settings.chat_completion_source == chat_completion_sources.POLLINATIONS) {
+        $('#pollinations_key_section').toggle(oai_settings.pollinations_endpoint === POLLINATIONS_ENDPOINT.AUTHENTICATED);
         $('#model_pollinations_select').trigger('change');
     }
     else if (oai_settings.chat_completion_source == chat_completion_sources.MOONSHOT) {
@@ -8272,9 +8279,6 @@ export function isImageInliningSupported(settings = oai_settings) {
         'mistral-medium-2505',
         'mistral-medium-2508',
         'pixtral',
-        // xAI (Grok)
-        'grok-4',
-        'grok-2-vision',
         // Moonshot
         'moonshot-v1-8k-vision-preview',
         'moonshot-v1-32k-vision-preview',
@@ -8312,7 +8316,7 @@ export function isImageInliningSupported(settings = oai_settings) {
         case chat_completion_sources.CLAUDE:
             return visionSupportedModels.some(model => settings.claude_model.includes(model));
         case chat_completion_sources.DEEPSEEK:
-            return ['deepseek-v4-flash-vision-exp', 'deepseek-v4.1-flash-expires-on-0910'].includes(settings.deepseek_model);
+            return ['deepseek-v4-flash-vision-exp', 'deepseek-flash'].includes(settings.deepseek_model);
         case chat_completion_sources.OPENROUTER:
             return (Array.isArray(model_list) && model_list.find(m => m.id === settings.openrouter_model)?.architecture?.input_modalities?.includes('image'));
         case chat_completion_sources.CUSTOM:
@@ -8322,8 +8326,7 @@ export function isImageInliningSupported(settings = oai_settings) {
         case chat_completion_sources.COHERE:
             return visionSupportedModels.some(model => settings.cohere_model.includes(model));
         case chat_completion_sources.XAI:
-            // TODO: xAI's /models endpoint doesn't return modality info
-            return visionSupportedModels.some(model => settings.xai_model.includes(model));
+            return (Array.isArray(model_list) && model_list.find(m => m.id === settings.xai_model)?.input_modalities?.includes('image'));
         case chat_completion_sources.AIMLAPI:
             return (Array.isArray(model_list) && model_list.find(m => m.id === settings.aimlapi_model)?.features?.includes('openai/chat-completion.vision'));
         case chat_completion_sources.CHUTES:
@@ -9394,6 +9397,12 @@ export function initOpenAI() {
         oai_settings.siliconflow_endpoint = String($(this).val());
         saveSettingsDebounced();
     });
+    $('#pollinations_endpoint').on('input', function () {
+        oai_settings.pollinations_endpoint = String($(this).val());
+        $('#pollinations_key_section').toggle(oai_settings.pollinations_endpoint === POLLINATIONS_ENDPOINT.AUTHENTICATED);
+        saveSettingsDebounced();
+    });
+
     $('#minimax_endpoint').on('input', function () {
         oai_settings.minimax_endpoint = String($(this).val());
         saveSettingsDebounced();

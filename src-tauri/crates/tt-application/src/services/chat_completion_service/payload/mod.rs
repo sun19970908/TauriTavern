@@ -30,6 +30,7 @@ mod tool_calls;
 mod tool_choice;
 mod vertexai;
 mod workers_ai;
+mod xai;
 mod zai;
 
 pub(super) fn build_payload(
@@ -60,7 +61,8 @@ pub(super) fn build_payload(
     match source {
         ChatCompletionSource::OpenAi
         | ChatCompletionSource::Groq
-        | ChatCompletionSource::SiliconFlow => openai::build(payload),
+        | ChatCompletionSource::SiliconFlow
+        | ChatCompletionSource::Pollinations => openai::build(payload),
         ChatCompletionSource::OpenCode => {
             match opencode_format.expect("OpenCode format resolved") {
                 OpenCodeApiFormat::OpenAiCompat => openai::build_chat(payload),
@@ -74,6 +76,7 @@ pub(super) fn build_payload(
         ChatCompletionSource::Moonshot => moonshot::build(payload),
         ChatCompletionSource::NanoGpt => nanogpt::build(payload),
         ChatCompletionSource::Chutes => chutes::build(payload),
+        ChatCompletionSource::Xai => xai::build(payload),
         ChatCompletionSource::WorkersAi => workers_ai::build(payload),
         ChatCompletionSource::OpenRouter => openrouter::build(payload),
         ChatCompletionSource::Zai => zai::build(payload),
