@@ -141,6 +141,12 @@ export class SlashCommandParser {
 
 
     constructor() {
+        // Indexes are owned by parse(); pre-seed them so a proxy/binding that
+        // drops writes can never hand out `undefined` to executorList pushes.
+        this.closureIndex = [];
+        this.commandIndex = [];
+        this.scopeIndex = [];
+        this.macroIndex = [];
         // add dummy commands for help strings / autocomplete
         if (!Object.keys(this.commands).includes('parser-flag')) {
             const help = {};
