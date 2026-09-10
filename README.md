@@ -1,10 +1,11 @@
 # tauritavern二改（基于2.2.0正式版）：
-修改内容：src/script.js、src/scripts/extentions.js
+修改内容：src/script.js、src/scripts/extentions.js、src-tauri/crates/tt-application/src/services/settings_service.rs
 
 1. 允许虚拟化时酒馆助手和小白x同时运行，需要二改的小白x
 2. 保存聊天改为异步，通过酒馆助手脚本开关，增加一个悬浮窗可以查看保存聊天的进度
 3. 编辑消息保存后改为分片保存，且让出主线程
 4. 保存消息前增加一个校验过程，跳过无意义写盘
+5. 修复dev刷新之后无法保存设置的问题
 
 （酒馆助手脚本在仓库里）
 
