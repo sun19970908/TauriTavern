@@ -11,7 +11,10 @@ test('chat saves remain serialized across character and group entrypoints', asyn
     const groups = await readFile(path.join(REPO_ROOT, 'src/scripts/group-chats.js'), 'utf8');
 
     assert.match(script, /export function enqueueChatSave\s*\(/);
-    assert.match(script, /export async function saveChat[\s\S]*?return\s+enqueueChatSave\s*\(/);
+    // saveChat 必须把任务交给串行队列，并把队列的 promise 返回给调用方。
+    // 允许经 trackChatRecordSave 之类的包装层透传（保存去重会先存 entry.promise 再返回）。
+    assert.match(script, /export async function saveChat[\s\S]*?enqueueChatSave\s*\(/);
+    assert.match(script, /export async function saveChat[\s\S]*?return\s+(?:await\s+)?(?:[\w.]*[Pp]romise|enqueueChatSave\s*\()/);
     assert.match(script, /export async function saveChatConditional[\s\S]*?enqueueChatSave\s*\(/);
     assert.match(groups, /async function saveGroupChat[\s\S]*?return\s+enqueueChatSave\s*\(/);
 
@@ -31,7 +34,10 @@ test('chat saves remain serialized across character and group entrypoints', asyn
     assert.match(saveChatUnsafe, /if \(!isIntegrityError\)[\s\S]*?toastr\.error[\s\S]*?throw error;/);
     assert.match(saveGroupChatUnsafe, /if \(!isIntegrityError\)[\s\S]*?toastr\.error[\s\S]*?throw error;/);
     assert.match(saveChatConditional, /await Promise\.all\(\[savePromise, postSavePromise\]\);/);
-    assert.doesNotMatch(saveChatConditional, /catch\s*\(/);
+    // 异步开关打开时允许 fire-and-forget，但保存失败必须被显式记录，不能静默吞掉：
+    // postSavePromise.catch -> console.warn，savePromise -> fireAndForgetSaveChat 内的 console.error。
+    assert.doesNotMatch(saveChatConditional, /catch\s*\(\s*\w*\s*\)\s*\{\s*\}/);
+    assert.match(saveChatConditional, /catch[\s\S]{0,240}?console\.(?:error|warn)|fireAndForgetSaveChat\s*\(savePromise/);
 });
 
 test('core chat load keeps full data while initial DOM remains truncated', async () => {
