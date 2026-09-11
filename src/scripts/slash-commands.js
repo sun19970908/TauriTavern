@@ -115,36 +115,12 @@ export {
     executeSlashCommands, executeSlashCommandsWithOptions, getSlashCommandsHelp, registerSlashCommand,
 };
 
-let _parserInstance = null;
-function getParserInstance() {
-    return _parserInstance ??= new SlashCommandParser();
-}
-// Lazy proxy: defer SlashCommandParser construction until first property access.
-// This sidesteps the "Cannot access 'SlashCommand' before initialization" TDZ that
-// fires when the parser is constructed at module-evaluation time inside the
-// script.js <-> slash-commands.js import cycle on some WebView implementations.
-// Every trap resolves through getParserInstance(), so writes land on the real
-// instance too: parse() assigns this.closureIndex/commandIndex/scopeIndex/
-// macroIndex and immediately reads them back, which a get-only proxy would
-// silently drop (TypeError: Cannot read properties of undefined (reading 'push')).
-// isExtensible/preventExtensions are intentionally not trapped to avoid proxy
-// invariant mismatches between the empty target and the real instance.
-const parser = new Proxy(Object.create(null), {
-    get: (_target, prop) => Reflect.get(getParserInstance(), prop),
-    set: (_target, prop, value) => Reflect.set(getParserInstance(), prop, value),
-    has: (_target, prop) => Reflect.has(getParserInstance(), prop),
-    deleteProperty: (_target, prop) => Reflect.deleteProperty(getParserInstance(), prop),
-    defineProperty: (_target, prop, descriptor) => Reflect.defineProperty(getParserInstance(), prop, descriptor),
-    getOwnPropertyDescriptor: (_target, prop) => Reflect.getOwnPropertyDescriptor(getParserInstance(), prop),
-    ownKeys: () => Reflect.ownKeys(getParserInstance()),
-    getPrototypeOf: () => Reflect.getPrototypeOf(getParserInstance()),
-});
-export { parser };
+export const parser = new SlashCommandParser();
 /**
  * @deprecated Use SlashCommandParser.addCommandObject() instead
  */
 const registerSlashCommand = SlashCommandParser.addCommand.bind(SlashCommandParser);
-const getSlashCommandsHelp = () => getParserInstance().getHelpString();
+const getSlashCommandsHelp = parser.getHelpString.bind(parser);
 
 /**
  * Converts a SlashCommandClosure to a filter function that returns a boolean.
