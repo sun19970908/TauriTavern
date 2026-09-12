@@ -34,6 +34,8 @@ import {
     loadCharacterChatPayload,
     loadGroupChatPayload,
     normalizeChatFileName,
+    saveCharacterChatPayload,
+    saveCharacterChatMetadata,
 } from './scripts/chat-payload-transport.js';
 import { getActiveChatSnapshot } from './tauri/main/adapters/st/active-chat-ref.js';
 import { extension_prompt_roles, extension_prompt_types } from './scripts/extension-prompts.js';
@@ -139,6 +141,7 @@ import {
     groups,
     selected_group,
     saveGroupChat,
+    saveGroupMetadata,
     getGroups,
     applyGroupsSnapshot,
     generateGroupWrapper,
@@ -594,6 +597,17 @@ export let name1 = default_user_name;
 export let name2 = systemUserName;
 /** @type {ChatMessage[]} */
 export let chat = [];
+
+/**
+ * Keeps the canonical array without expanding the history into function arguments.
+ * @param {ChatMessage[]} messages
+ */
+export function replaceChatContents(messages) {
+    for (let index = 0; index < messages.length; index++) {
+        chat[index] = messages[index];
+    }
+    chat.length = messages.length;
+}
 
 /**
  * @type {import('./scripts/constants.js').SWIPE_STATE}
@@ -6837,7 +6851,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             return await swipe(null, SWIPE_DIRECTION.RIGHT, { source: SWIPE_SOURCE.AUTO_SWIPE, repeated: true, forceMesId: chat.length - 1 });
         }
 
-        console.debug('/api/chats/save called by /Generate');
+        console.debug('Chat save called by /Generate');
         await saveChatConditional(isImpersonate
             ? CHAT_COMMIT_REASON.MUTATION
             : CHAT_COMMIT_REASON.GENERATION_CHECKPOINT);
@@ -8668,7 +8682,7 @@ export function resetChatState() {
     //unsets expected chid before reloading (related to getCharacters/printCharacters from using old arrays)
     setCharacterId(undefined);
     // sets up system user to tell user about having deleted a character
-    chat.splice(0, chat.length, ...SAFETY_CHAT);
+    replaceChatContents(SAFETY_CHAT);
     // resets chat metadata
     chat_metadata = {};
     // resets the characters array, forcing getcharacters to reset
@@ -8902,22 +8916,12 @@ async function renamePastChats(oldAvatar, newAvatar, newName) {
 
                 await eventSource.emit(event_types.CHARACTER_RENAMED_IN_PAST_CHAT, currentChat, oldAvatar, newAvatar);
 
-                const saveChatRequest = await compressRequest({
-                    method: 'POST',
-                    headers: getRequestHeaders(),
-                    body: JSON.stringify({
-                        ch_name: newName,
-                        file_name: fileNameWithoutExtension,
-                        chat: currentChat,
-                        avatar_url: newAvatar,
-                    }),
-                    cache: 'no-cache',
+                await saveCharacterChatPayload({
+                    characterName: newName,
+                    avatarUrl: newAvatar,
+                    fileName: fileNameWithoutExtension,
+                    payload: currentChat,
                 });
-                const saveChatResponse = await fetch('/api/chats/save', saveChatRequest);
-
-                if (!saveChatResponse.ok) {
-                    throw new Error('Could not save chat');
-                }
             }
         } catch (error) {
             toastr.error(t`Past chat could not be updated: ${file_name}`);
@@ -9031,113 +9035,50 @@ export async function saveChat(...args) {
     return entry.promise;
 }
 
-// [SAVE-CONTENT-DEDUP-20260902] 写盘内容去重（方案C：saveChatConditional 入口指纹）
-// 背景：MVU（MagVarUpdate）/LWB 等会在切聊天后 7~16 秒触发"幂等清理"型 saveMetadataDebounced，
-//       内容其实零变化，但每次都完整走一遍 jsonl 序列化 + IPC + 落盘（安卓端 = 闪存磨损 + 耗电）。
-// 做法：stringifyChatSaveBody 本来就要逐条 JSON.stringify(payload)，顺手在同一段循环里对 payload
-//       做 FNV-1a 双种子指纹 —— 真实写盘**零额外序列化成本**，只多一次字符串哈希扫描。
-// 安全性：指纹逐条覆盖 payload 全部字段（chatHeader + 每条消息），与实际发出的 body 一一对应，不存在漏字段。
-//         只对 commitReason === mutation 且非 force 生效；MAINTENANCE / PROVIDER_BARRIER / GENERATION_CHECKPOINT 一律放行。
-// 自愈：缓存按聊天定位符(name|file|avatar)分键。若磁盘被外部改动，重载后内存态与缓存指纹不同 → 正常写盘并刷新缓存。
-// 开关：localStorage.setItem('__TT_SAVE_CONTENT_DEDUP_OFF','1') 可随时关闭。
-function __fnv1a32(str, seed) {
-    let h = seed >>> 0;
-    for (let i = 0; i < str.length; i++) {
-        h ^= str.charCodeAt(i);
-        h = Math.imul(h, 0x01000193) >>> 0;
+/** Prompts for an integrity overwrite; reloads if the user declines. */
+async function confirmChatIntegrityOverwrite() {
+    const popupResult = await Popup.show.input(
+        t`ERROR: Chat integrity check failed while saving the file.`,
+        t`<p>After you click OK, the page will be reloaded to prevent data corruption.</p>
+              <p>To confirm an overwrite (and potentially <b>LOSE YOUR DATA</b>), enter <code>OVERWRITE</code> (in all caps) in the box below before clicking OK.</p>`,
+        '',
+        { okButton: 'OK', cancelButton: false },
+    );
+
+    if (popupResult === 'OVERWRITE') {
+        return true;
     }
-    return h >>> 0;
-}
-const __SAVE_DEDUP_MAX_KEYS = 200;
-const __lastWrittenChatHash = new Map();  // locator -> 16 位十六进制指纹（只存指纹，不存内容，内存可忽略）
 
-function __hashChatPayloadItem(itemJson, hashPair) {
-    hashPair[0] = __fnv1a32(itemJson, hashPair[0]);
-    hashPair[1] = __fnv1a32(itemJson, hashPair[1]);
-    hashPair[0] = __fnv1a32('\u0000', hashPair[0]);
-    hashPair[1] = __fnv1a32('\u0000', hashPair[1]);
+    console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
+    window.location.reload();
+    return false;
 }
 
-function __finishChatPayloadHash(hashPair, itemCount) {
-    const a = __fnv1a32(`#${itemCount}`, hashPair[0]);
-    const b = __fnv1a32(`#${itemCount}`, hashPair[1]);
-    return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
-}
-
-// [SAVE-HASH-PERSIST-20260902] 指纹跨会话持久化
-// 目的：开卡后"该会话的第一次保存"也能命中缓存 → 每会话每聊天 0 次写盘。
-// 原理：开卡时内存态必然 == 磁盘态（刚读出来），所以那次保存请求的内容与磁盘一致，本就该拦。
-//       之前拦不住只是因为内存缓存在应用重启后清空了，手上没有可比的基准。
-// 自愈：磁盘被外部改动 → 重载后内存态 == 新磁盘态 → 算出的指纹 ≠ 旧记录 → 正常写盘并刷新记录。
-// 开关：localStorage '__TT_SAVE_CONTENT_DEDUP_OFF' = '1' 关闭去重（同时停止持久化）。
-// 清空：localStorage.removeItem('__TT_SAVE_CONTENT_HASHES')
-const __SAVE_HASH_LS_KEY = '__TT_SAVE_CONTENT_HASHES';
-let __saveHashPersistTimer = null;
-
-function __isSaveDedupDisabled() {
-    try { return !!localStorage.getItem('__TT_SAVE_CONTENT_DEDUP_OFF'); } catch { return false; }
-}
-
-function __loadPersistedSaveHashes() {
+/**
+ * Runs one chat write under the shared failure policy: an integrity conflict asks the user
+ * before `recover` overwrites the file; every other failure is reported and rethrown.
+ * @param {{ save: () => Promise<void>, recover?: () => Promise<void>, title: string }} options
+ */
+export async function runChatSave({ save, recover, title }) {
     try {
-        const raw = localStorage.getItem(__SAVE_HASH_LS_KEY);
-        if (!raw) return;
-        const obj = JSON.parse(raw);
-        if (!obj || typeof obj !== 'object') return;
-        for (const [k, v] of Object.entries(obj)) {
-            if (typeof k === 'string' && typeof v === 'string' && /^[0-9a-f]{16}$/.test(v)) {
-                __lastWrittenChatHash.set(k, v);
-            }
+        await save();
+    } catch (error) {
+        if (error?.code !== 'integrity' || !recover) {
+            console.error(error);
+            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, title);
+            throw error;
         }
-    } catch { /* 损坏就当没有，首次照常写盘 */ }
-}
-
-function __persistSaveHashes() {
-    if (__isSaveDedupDisabled()) return;
-    if (__saveHashPersistTimer) clearTimeout(__saveHashPersistTimer);
-    __saveHashPersistTimer = setTimeout(() => {
-        __saveHashPersistTimer = null;
-        try {
-            const obj = {};
-            for (const [k, v] of __lastWrittenChatHash) obj[k] = v;
-            localStorage.setItem(__SAVE_HASH_LS_KEY, JSON.stringify(obj));
-        } catch { /* 配额满等情况忽略，不影响写盘 */ }
-    }, 2000);
-}
-
-// 模块加载时把上次的指纹读回内存，让"本会话第一次保存"就能命中去重
-__loadPersistedSaveHashes();
-
-// [SAVE-STRINGIFY-YIELD-20260829] 保存请求体逐条序列化并周期让出主线程（保守版优化）
-// 产出与 JSON.stringify({ch_name, file_name, chat: payload, avatar_url, force, commit_reason})
-// 完全等价的 JSON 文本，但 chat 数组逐条序列化，前台每 ~16ms 让出一次事件循环，
-// 安卓大聊天保存期间 UI 不再长时间冻结；后台页面不让出，避免定时器节流拖慢保存
-async function stringifyChatSaveBody(parts, payload) {
-    const envelope = JSON.stringify({
-        ch_name: parts.ch_name,
-        file_name: parts.file_name,
-        avatar_url: parts.avatar_url,
-        force: parts.force,
-        commit_reason: parts.commit_reason,
-    });
-    let body = envelope.slice(0, -1) + ',"chat":[';
-    let batchStart = performance.now();
-    const stringifyStart = batchStart;
-    let yieldCount = 0;
-    const hashPair = [0x811c9dc5, 0x01000193];
-    for (let index = 0; index < payload.length; index++) {
-        const itemJson = JSON.stringify(payload[index]);
-        body += (index > 0 ? ',' : '') + itemJson;
-        __hashChatPayloadItem(itemJson, hashPair);
-        if (performance.now() - batchStart >= 16 && document.visibilityState === 'visible') {
-            yieldCount++;
-            await new Promise(resolve => setTimeout(resolve, 0));
-            batchStart = performance.now();
+        if (await confirmChatIntegrityOverwrite()) {
+            await recover();
         }
     }
-    const contentHash = __finishChatPayloadHash(hashPair, payload.length);
-    console.info(`[SAVE-STRINGIFY] chat=${payload.length}条 yields=${yieldCount} ${(performance.now() - stringifyStart).toFixed(0)}ms hash=${contentHash}`);
-    return { body: body + ']}', contentHash };
+}
+
+/** The `chat_metadata` that goes to disk: the canonical object without its transient in-context marker. */
+export function persistedChatMetadata(overrides) {
+    const metadata = { ...chat_metadata, ...overrides };
+    delete metadata.lastInContextMessageId;
+    return metadata;
 }
 
 async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, chatData = undefined, commitReason = CHAT_COMMIT_REASON.MUTATION } = {}) {
@@ -9146,8 +9087,6 @@ async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, ch
         [chatName, withMetadata, mesId, force] = arguments;
     }
 
-    const metadata = { ...chat_metadata, ...(withMetadata || {}) };
-    delete metadata.lastInContextMessageId;
     const fileName = chatName ?? characters[this_chid]?.chat;
 
     if (!fileName && name2 === neutralCharacterName) {
@@ -9170,88 +9109,25 @@ async function saveChatUnsafe({ chatName, withMetadata, mesId, force = false, ch
 
     /** @type {ChatHeader} */
     const chatHeader = {
-        chat_metadata: metadata,
+        chat_metadata: persistedChatMetadata(withMetadata),
         user_name: 'unused',
         character_name: 'unused',
     };
     const payload = [chatHeader, ...trimmedChat];
 
-    try {
-        const { body: saveChatRequestBody, contentHash: saveContentHash } = await stringifyChatSaveBody({
-            ch_name: characters[this_chid].name,
-            file_name: fileName,
-            avatar_url: characters[this_chid].avatar,
-            force: force,
-            commit_reason: commitReason,
-        }, payload);
-
-        // [SAVE-CONTENT-DEDUP-20260902] 内容与上次成功写盘完全一致 → 跳过 IPC 与落盘
-        const __dedupKey = `${characters[this_chid]?.name ?? ''}|${fileName}|${characters[this_chid]?.avatar ?? ''}`;
-        const __dedupEligible = !force && commitReason === CHAT_COMMIT_REASON.MUTATION;
-        if (__dedupEligible && !__isSaveDedupDisabled()) {
-            const __prevHash = __lastWrittenChatHash.get(__dedupKey);
-            if (__prevHash !== undefined && __prevHash === saveContentHash) {
-                console.info(`[SAVE-DEDUP] 内容未变化，跳过写盘 chat=${fileName} hash=${saveContentHash}`);
-                return;
-            }
-        }
-        const saveChatRequest = await compressRequest({
-            method: 'POST',
-            cache: 'no-cache',
-            headers: getRequestHeaders(),
-            body: saveChatRequestBody,
-        });
-        const result = await fetch('/api/chats/save', saveChatRequest);
-
-        if (result.ok) {
-            if (__dedupEligible) {
-                if (__lastWrittenChatHash.size >= __SAVE_DEDUP_MAX_KEYS) {
-                    const oldest = __lastWrittenChatHash.keys().next().value;
-                    if (oldest !== undefined) __lastWrittenChatHash.delete(oldest);
-                }
-                __lastWrittenChatHash.set(__dedupKey, saveContentHash);
-                __persistSaveHashes();
-            }
-            return;
-        }
-
-        const errorData = await result.json();
-        const isIntegrityError = errorData?.error === 'integrity' && !force;
-        if (isIntegrityError) {
-            const integrityError = new Error('integrity');
-            integrityError.code = 'integrity';
-            throw integrityError;
-        }
-        throw new Error(result.statusText);
-    } catch (error) {
-        const isIntegrityError = (
-            String(error?.code || '').toLowerCase() === 'integrity'
-            || /integrity/i.test(String(error?.message || ''))
-        ) && !force;
-        if (!isIntegrityError) {
-            console.error(error);
-            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
-            throw error;
-        }
-
-        const popupResult = await Popup.show.input(
-            t`ERROR: Chat integrity check failed while saving the file.`,
-            t`<p>After you click OK, the page will be reloaded to prevent data corruption.</p>
-              <p>To confirm an overwrite (and potentially <b>LOSE YOUR DATA</b>), enter <code>OVERWRITE</code> (in all caps) in the box below before clicking OK.</p>`,
-            '',
-            { okButton: 'OK', cancelButton: false },
-        );
-
-        const forceSaveConfirmed = popupResult === 'OVERWRITE';
-
-        if (!forceSaveConfirmed) {
-            console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
-            window.location.reload();
-            return;
-        }
-
-        await saveChatUnsafe({ chatName, withMetadata, mesId, force: true, chatData, commitReason });
-    }
+    await runChatSave({
+        title: t`Chat could not be saved`,
+        save: () => saveCharacterChatPayload({
+            characterName: characters[this_chid].name,
+            avatarUrl: characters[this_chid].avatar,
+            fileName,
+            payload,
+            force,
+            commitReason,
+        }),
+        // A forced save skips the integrity check, so nothing is left to recover.
+        recover: force ? undefined : () => saveChatUnsafe({ chatName, withMetadata, mesId, force: true, chatData, commitReason }),
+    });
 }
 
 /**
@@ -9455,7 +9331,7 @@ export async function getChat({ allowNewChat = false } = {}) {
             /** @type {ChatHeader} */
             const chatHeader = data.shift();
             chat_metadata = chatHeader?.chat_metadata ?? {};
-            chat.splice(0, chat.length, ...data);
+            replaceChatContents(data);
             chat.forEach(ensureMessageMediaIsArray);
         } else if (allowNewChat) {
             chat.splice(0, chat.length);
@@ -11355,7 +11231,26 @@ export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
 }
 
 export async function saveMetadata() {
-    return await saveChatConditional();
+    if (selected_group) {
+        return saveGroupMetadata(selected_group);
+    }
+    if (this_chid === undefined) {
+        return;
+    }
+
+    return enqueueChatSave(() => runChatSave({
+        title: t`Chat could not be saved`,
+        save: () => {
+            const character = characters[this_chid];
+            return saveCharacterChatMetadata({
+                characterName: character.name,
+                avatarUrl: character.avatar,
+                fileName: character.chat,
+                chatMetadata: persistedChatMetadata(),
+            });
+        },
+        recover: () => saveChatUnsafe({ force: true }),
+    }));
 }
 
 export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTATION) {
