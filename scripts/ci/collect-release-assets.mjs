@@ -10,13 +10,7 @@ import { pathToFileURL } from 'node:url';
 const RELEASE_ASSETS = new Map([
     ['android-arm-apk', ['android-armeabi-v7a.apk', '.apk']],
     ['android-arm64-apk', ['android-arm64-v8a.apk', '.apk']],
-    ['darwin-aarch64-dmg', ['macos-arm64.dmg', '.dmg']],
-    ['darwin-x64-dmg', ['macos-x64.dmg', '.dmg']],
-    ['debug-darwin-aarch64-dmg', ['macos-arm64-DEBUG.dmg', '.dmg']],
-    ['debug-darwin-x64-dmg', ['macos-x64-DEBUG.dmg', '.dmg']],
     ['debug-windows-x64-nsis', ['windows-x64-setup-DEBUG.exe', '.exe']],
-    ['ios-arm64-ipa', ['ios-arm64.ipa', '.ipa']],
-    ['ios-arm64-TestFlight-ipa', ['ios-arm64-TestFlight.ipa', '.ipa']],
     ['linux-aarch64-rpm', ['linux-arm64.rpm', '.rpm']],
     ['linux-amd64-appimage', ['linux-x64.AppImage', '.AppImage']],
     ['linux-amd64-deb', ['linux-x64.deb', '.deb']],
@@ -37,8 +31,6 @@ const IGNORED_ARTIFACTS = new Set([
 ]);
 
 const DEBUG_ARTIFACTS = new Set([
-    'debug-darwin-aarch64-dmg',
-    'debug-darwin-x64-dmg',
     'debug-windows-x64-nsis',
 ]);
 

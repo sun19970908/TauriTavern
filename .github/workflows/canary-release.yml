@@ -75,22 +75,6 @@ jobs:
             target_args: --debug --bundles nsis
             artifact_prefix: debug-
             portable: false
-          - platform: macos-latest
-            target_args: --target x86_64-apple-darwin
-            artifact_prefix: ""
-            portable: false
-          - platform: macos-latest
-            target_args: --target x86_64-apple-darwin --debug --bundles dmg
-            artifact_prefix: debug-
-            portable: false
-          - platform: macos-latest
-            target_args: --target aarch64-apple-darwin
-            artifact_prefix: ""
-            portable: false
-          - platform: macos-latest
-            target_args: --target aarch64-apple-darwin --debug --bundles dmg
-            artifact_prefix: debug-
-            portable: false
           - platform: ubuntu-22.04
             target_args: --bundles appimage,deb,rpm
             artifact_prefix: ""
@@ -116,8 +100,6 @@ jobs:
             gstreamer1.0-alsa gstreamer1.0-pulseaudio
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -148,23 +130,10 @@ jobs:
             > "$config_path"
           echo "config_path=$config_path" >> "$GITHUB_OUTPUT"
 
-      - name: Setup macOS signing and notarization
-        if: matrix.platform == 'macos-latest'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-        run: ./scripts/ci/setup-macos-signing.sh
-
       - name: Build desktop bundles
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_API_ISSUER: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_API_ISSUER || '' }}
-          APPLE_API_KEY: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_API_KEY || '' }}
         with:
           projectPath: src-tauri/crates/tauritavern
           tauriScript: node ../../../scripts/tauri-app.mjs
@@ -195,9 +164,6 @@ jobs:
           - mobile: android
             platform: ubuntu-latest
             args: --verbose --apk --split-per-abi --target aarch64 armv7
-          - mobile: ios
-            platform: macos-latest
-            args: --verbose
 
     concurrency:
       group: ${{ matrix.mobile == 'ios' && 'tauritavern-public-testflight-build' || format('{0}-{1}-{2}', github.workflow, github.run_id, matrix.mobile) }}
@@ -268,21 +234,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Prepare public TestFlight build identity
-        if: matrix.mobile == 'ios'
-        id: testflight-config
-        shell: bash
-        run: |
-          set -euo pipefail
-          epoch_minutes=$(( $(date -u +%s) / 60 ))
-          bundle_version="$((epoch_minutes / 10000)).$(((epoch_minutes / 100) % 100)).$((epoch_minutes % 100))"
-          config_path="$RUNNER_TEMP/tauritavern-testflight.json"
-          printf '{"bundle":{"iOS":{"bundleVersion":"%s"}}}\n' "$bundle_version" > "$config_path"
-          {
-            echo "path=$config_path"
-            echo "bundle_version=$bundle_version"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Setup Android signing
         if: matrix.mobile == 'android'
         shell: bash
@@ -293,22 +244,6 @@ jobs:
           base64 -d <<< "${{ secrets.ANDROID_KEY_BASE64 }}" > "$RUNNER_TEMP/keystore.jks"
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
-      - name: Setup App Store Connect API key
-        if: matrix.mobile == 'ios'
-        shell: bash
-        env:
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-        run: |
-          : "${APPLE_API_ISSUER:?Missing APPLE_API_ISSUER secret}"
-          : "${APPLE_API_KEY:?Missing APPLE_API_KEY secret}"
-          : "${APPLE_API_KEY_P8:?Missing APPLE_API_KEY_P8 secret}"
-          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
-          umask 077
-          printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
-          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
-
       - name: Enable HTTP access for standard mobile bundle
         run: ./scripts/ci/configure-mobile-http.sh enable "${{ matrix.mobile }}"
 
@@ -317,8 +252,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NDK_HOME: ${{ matrix.mobile == 'android' && steps.setup-ndk.outputs.ndk-path || '' }}
-          APPLE_API_ISSUER: ${{ matrix.mobile == 'ios' && secrets.APPLE_API_ISSUER || '' }}
-          APPLE_API_KEY: ${{ matrix.mobile == 'ios' && secrets.APPLE_API_KEY || '' }}
         with:
           projectPath: src-tauri/crates/tauritavern
           tauriScript: node ../../../scripts/tauri-app.mjs
@@ -329,56 +262,6 @@ jobs:
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
           workflowArtifactNamePattern: 'TauriTavern-${{ needs.prepare.outputs.asset_time }}-canary-[platform]-[arch]-[bundle]'
-
-      - name: Restore iOS transport security for TestFlight
-        if: matrix.mobile == 'ios'
-        run: ./scripts/ci/configure-mobile-http.sh disable ios
-
-      - name: Build public TestFlight IPA
-        if: matrix.mobile == 'ios'
-        uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          TAURITAVERN_IOS_POLICY_PROFILE: ios_external_beta
-          TAURITAVERN_SKIP_WEB_BUILD: "1"
-        with:
-          projectPath: src-tauri/crates/tauritavern
-          tauriScript: node ../../../scripts/tauri-app.mjs
-          mobile: ios
-          args: --verbose --export-method app-store-connect --config ${{ steps.testflight-config.outputs.path }}
-          uploadWorkflowArtifacts: true
-          uploadPlainBinary: true
-          uploadUpdaterJson: false
-          uploadUpdaterSignatures: false
-          workflowArtifactNamePattern: 'TauriTavern-${{ needs.prepare.outputs.asset_time }}-canary-[platform]-[arch]-TestFlight-[bundle]'
-
-  testflight:
-    needs: [prepare, publish]
-    permissions:
-      actions: read
-      contents: write
-    uses: ./.github/workflows/public-testflight.yml
-    with:
-      channel: canary
-      source_ref: ${{ github.sha }}
-      base_sha: ${{ needs.prepare.outputs.previous_sha }}
-      head_sha: ${{ github.sha }}
-      marketing_version: ${{ needs.prepare.outputs.stable_version }}
-      ipa_artifact: TauriTavern-${{ needs.prepare.outputs.asset_time }}-canary-ios-arm64-TestFlight-ipa
-      release_tag: Canary
-      release_asset: TauriTavern-${{ needs.prepare.outputs.asset_time }}-canary-ios-arm64-TestFlight.ipa
-      group_id: d379dde8-9206-4533-ba2c-c9f7569e57a7
-      group_name: TauriTavern Canary Test
-    secrets:
-      CODEX_API_KEY: ${{ secrets.CANARY_CODEX_API_KEY }}
-      CODEX_RESPONSES_ENDPOINT: ${{ secrets.CANARY_CODEX_RESPONSES_ENDPOINT }}
-      CODEX_MODEL: ${{ secrets.CANARY_CODEX_MODEL }}
-      CODEX_EFFORT: ${{ secrets.CANARY_CODEX_EFFORT }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
 
   notes-context:
     needs: prepare
