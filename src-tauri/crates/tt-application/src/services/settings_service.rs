@@ -211,6 +211,10 @@ impl SettingsService {
             settings.embedded_runtime_profile = embedded_runtime_profile;
         }
 
+        if let Some(cold_swipes_enabled) = dto.cold_swipes_enabled {
+            settings.cold_swipes_enabled = cold_swipes_enabled;
+        }
+
         if let Some(chat_virtualization_enabled) = dto.chat_virtualization_enabled {
             settings.chat_virtualization_enabled = chat_virtualization_enabled;
         }
@@ -968,6 +972,7 @@ mod tests {
                 panel_runtime_profile: None,
                 embedded_runtime_profile: None,
                 chat_virtualization_enabled: None,
+                cold_swipes_enabled: None,
                 codemirror_editor_enabled: None,
                 chat_backups: Some(UpdateChatBackupSettingsDto {
                     automatic_enabled: Some(false),
@@ -1028,6 +1033,7 @@ mod tests {
             panel_runtime_profile: None,
             embedded_runtime_profile: None,
             chat_virtualization_enabled: None,
+            cold_swipes_enabled: None,
             codemirror_editor_enabled: None,
             close_to_tray_on_close: None,
             request_proxy: None,
@@ -1095,6 +1101,7 @@ mod tests {
                 panel_runtime_profile: None,
                 embedded_runtime_profile: None,
                 chat_virtualization_enabled: None,
+                cold_swipes_enabled: None,
                 codemirror_editor_enabled: None,
                 close_to_tray_on_close: None,
                 request_proxy: None,

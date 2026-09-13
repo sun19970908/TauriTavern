@@ -31,6 +31,13 @@ import { initializeCodeMirrorEditor } from './scripts/tauri/codemirror-editor.js
 import { getStreamingRenderInterval, normalizeStreamingFps, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
 import {
     CHAT_COMMIT_REASON,
+    initializeColdSwipes,
+    coldSwipesEnabled,
+    acceptColdChatPayload,
+    discardColdChatPayload,
+    releaseCurrentSwipeSource,
+    hydrateMessageSwipes,
+    readColdSwipeRecord,
     loadCharacterChatPayload,
     loadGroupChatPayload,
     normalizeChatFileName,
@@ -603,6 +610,7 @@ export let chat = [];
  * @param {ChatMessage[]} messages
  */
 export function replaceChatContents(messages) {
+    acceptColdChatPayload(messages);
     for (let index = 0; index < messages.length; index++) {
         chat[index] = messages[index];
     }
@@ -1190,6 +1198,7 @@ async function firstLoadInit() {
         await hostReadyPromise;
         const tauriTavernSettings = await getTauriTavernSettings();
         initializeChatVirtualization(tauriTavernSettings);
+        initializeColdSwipes(tauriTavernSettings);
         initializeCodeMirrorEditor(tauriTavernSettings);
 
         const tokenResponse = await fetch('/csrf-token');
@@ -2263,7 +2272,10 @@ export async function clearChat({ clearData = false } = {}) {
     await saveItemizedPrompts(getCurrentChatId());
     unloadItemizedPrompts();
 
-    if (clearData) chat.length = 0;
+    if (clearData) {
+        chat.length = 0;
+        releaseCurrentSwipeSource();
+    }
 }
 
 export async function deleteLastMessage() {
@@ -2311,7 +2323,7 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
         return;
     }
 
-    const deletedAgentStateIds = collectAgentPersistStateIdsFromMessage(chat[id]);
+    const deletedMessage = chat[id];
     deleteItemizedPromptForMessage(id);
     chat.splice(id, 1);
 
@@ -2319,6 +2331,7 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
 
     updateViewMessageIds();
     saveChatDebounced();
+    void cleanupDeletedMessageStates([deletedMessage]);
 
     if (this_edit_mes_id === id) {
         this_edit_mes_id = undefined;
@@ -2328,10 +2341,6 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
     refreshActiveSwipeButtons();
 
     await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
-    if (deletedAgentStateIds.length > 0) {
-        await saveChatConditional();
-        await pruneAgentPersistentStatesAfterDeletion(deletedAgentStateIds);
-    }
 }
 
 export const reloadChatMutex = new SimpleMutex(reloadCurrentChatUnsafe);
@@ -7050,6 +7059,55 @@ function requireAgentPromptAssemblyApi() {
     return promptAssemblyApi;
 }
 
+/** Internal first-party boundary: navigation during the read cancels only the old action. */
+export async function hydrateChatMessageSwipes(messageId) {
+    const message = chat[messageId];
+    if (!message) return false;
+    if (message.tt_swipe_cold) {
+        try {
+            await hydrateMessageSwipes(message);
+        } catch (error) {
+            if (chat[messageId] !== message) return false;
+            toastr.error(t`Could not load this message's swipes.`, t`Swipe Load Failed`);
+            throw error;
+        }
+    }
+    return chat[messageId] === message;
+}
+
+/** Ancillary cleanup never delays deletion and always targets the chat captured before its first await. */
+async function cleanupDeletedMessageStates(messages, saved) {
+    try {
+        if (selected_group || this_chid === undefined) return;
+        if (!messages.some(message => message.tt_swipe_cold || collectAgentPersistStateIdsFromMessage(message).length)) return;
+        const chatRef = getActiveChatSnapshot().ref;
+        const [ids] = await Promise.all([
+            collectDeletedAgentStateIds(messages),
+            saved ?? flushDebouncedChatSave(),
+        ]);
+        await pruneAgentPersistentStatesAfterDeletion(ids, chatRef);
+    } catch (error) {
+        console.warn('Skipped persistent-state cleanup for deleted messages', error);
+    }
+}
+
+async function collectDeletedAgentStateIds(messages) {
+    const ids = [];
+    for (const message of messages) {
+        ids.push(...collectAgentPersistStateIdsFromMessage(message));
+        if (message.tt_swipe_cold) {
+            try {
+                const original = await readColdSwipeRecord(message.tt_swipe_cold);
+                ids.push(...collectAgentPersistStateIdsFromMessage(original));
+            } catch (error) {
+                // State-file cleanup is ancillary to deleting the message; the chat save still validates its remaining cold records.
+                console.warn('Skipped persistent-state cleanup for a deleted cold message', error);
+            }
+        }
+    }
+    return ids;
+}
+
 function collectAgentPersistStateIdsFromMessage(message) {
     const ids = [];
     collectAgentPersistStateIdFromExtra(message?.extra, ids);
@@ -7074,12 +7132,12 @@ function collectAgentPersistStateIdFromExtra(extra, ids) {
     }
 }
 
-async function pruneAgentPersistentStatesAfterDeletion(deletedStateIds) {
+async function pruneAgentPersistentStatesAfterDeletion(deletedStateIds, chatRef) {
     if (!Array.isArray(deletedStateIds) || deletedStateIds.length === 0) {
         return;
     }
     const candidateStateIds = Array.from(new Set(deletedStateIds));
-    if (selected_group || this_chid === undefined) {
+    if (!chatRef && (selected_group || this_chid === undefined)) {
         return;
     }
 
@@ -7087,7 +7145,7 @@ async function pruneAgentPersistentStatesAfterDeletion(deletedStateIds) {
     if (!agentApi || typeof agentApi.pruneChatPersistentStates !== 'function') {
         return;
     }
-    await agentApi.pruneChatPersistentStates({ candidateStateIds });
+    await agentApi.pruneChatPersistentStates({ candidateStateIds, chatRef });
 }
 
 function assertAgentPromptSnapshotHasNoExternalTools(payload) {
@@ -8423,6 +8481,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
  */
 export function ensureSwipes(message) {
     let updated = false;
+    if (message?.tt_swipe_cold) return updated;
 
     if (!message || typeof message !== 'object') {
         console.trace(`[ensureSwipes] failed. '${message}' is not an object.`);
@@ -9305,6 +9364,7 @@ export async function getChat({ allowNewChat = false } = {}) {
     const isStillSelected = () => startedSelectedGroup === selected_group && startedChid === this_chid;
     let startedCharacter;
     let startedChatFile;
+    let data;
 
     try {
         await unshallowCharacter(startedChid);
@@ -9314,7 +9374,8 @@ export async function getChat({ allowNewChat = false } = {}) {
 
         startedCharacter = startedChid !== undefined ? characters[startedChid] : null;
         startedChatFile = startedCharacter?.chat;
-        const data = await loadCharacterChatPayload({
+        data = await loadCharacterChatPayload({
+            coldSwipes: coldSwipesEnabled(),
             characterName: startedCharacter?.name,
             avatarUrl: startedCharacter?.avatar,
             fileName: startedChatFile,
@@ -9334,7 +9395,7 @@ export async function getChat({ allowNewChat = false } = {}) {
             replaceChatContents(data);
             chat.forEach(ensureMessageMediaIsArray);
         } else if (allowNewChat) {
-            chat.splice(0, chat.length);
+            replaceChatContents(data);
             chat_metadata = {};
         } else {
             throw new Error('Chat payload is empty');
@@ -9364,6 +9425,8 @@ export async function getChat({ allowNewChat = false } = {}) {
         console.error(error);
         toastr.error(t`Chat could not be loaded.`, t`Chat Load Failed`);
         throw error;
+    } finally {
+        discardColdChatPayload(data);
     }
 }
 
@@ -11176,6 +11239,8 @@ export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
         return;
     }
 
+    if (!await hydrateChatMessageSwipes(messageId)) return;
+
     let newSwipeId;
     if (swipeId < currentSwipeId) {
         newSwipeId = currentSwipeId - 1;
@@ -11891,7 +11956,7 @@ export async function createOrEditCharacter(e) {
             if (shouldRegenerateMessage) {
                 let messageId;
                 await withChatSurfaceStructureMutation(async () => {
-                    chat.splice(0, chat.length, message);
+                    replaceChatContents([message]);
                     messageId = (chat.length - 1);
                     await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, 'first_message');
                     await clearChat();
@@ -12311,6 +12376,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
 
     swipeState = SWIPE_STATE.SWIPING;
     try {
+        if (!await hydrateChatMessageSwipes(mesId)) return;
         if (mesId === Number(this_edit_mes_id)) {
             closeMessageEditor();
         }
@@ -13233,7 +13299,7 @@ export async function newAssistantChat({ temporary = false } = {}) {
     if (!temporary) {
         return openPermanentAssistantChat();
     }
-    chat.splice(0, chat.length);
+    replaceChatContents([]);
     chat_metadata = {};
     setCharacterName(neutralCharacterName);
     sendSystemMessage(system_message_types.ASSISTANT_NOTE);
@@ -14006,19 +14072,18 @@ jQuery(async function () {
         syncMountedDeleteState(chatSurface.getMountedMessageIds());
 
         if (deleteFrom >= 0) {
-            const deletedAgentStateIds = chat
-                .slice(deleteFrom)
-                .flatMap(collectAgentPersistStateIdsFromMessage);
+            const deletedMessages = chat.slice(deleteFrom);
             for (let i = (chat.length - 1); i >= deleteFrom; i--) {
                 deleteItemizedPromptForMessage(i);
             }
             chat.length = deleteFrom;
             reconcileMountedChatSurface();
             chat_metadata.tainted = true;
-            await saveChatConditional();
+            const saved = saveChatConditional();
+            void cleanupDeletedMessageStates(deletedMessages, saved);
+            await saved;
             setChatScrollTop(getChatScrollHeight());
             await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
-            await pruneAgentPersistentStatesAfterDeletion(deletedAgentStateIds);
         } else {
             console.log('No message selected for deletion');
         }
