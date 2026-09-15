@@ -72,7 +72,7 @@ jobs:
             portable: true
             portable_name: windows-x64
           - platform: windows-latest
-            target_args: --debug --bundles nsis
+            target_args: --debug --bundles nsis --features devtools-pilot --config src-tauri/crates/tauritavern/tauri.pilot.conf.json
             artifact_prefix: debug-
             portable: false
           - platform: ubuntu-22.04
