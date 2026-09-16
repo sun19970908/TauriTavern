@@ -284,6 +284,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::image_commands::delete_user_image,
         // Avatar commands
         super::avatar_commands::get_avatars,
+        super::avatar_commands::get_personas,
         super::avatar_commands::delete_avatar,
         super::avatar_commands::upload_avatar,
         // Group commands
@@ -360,6 +361,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::skill_commands::download_skill_import_url,
         super::skill_commands::list_skills,
         super::skill_commands::list_skill_files,
+        super::skill_commands::discover_skill_imports,
+        super::skill_commands::discard_skill_import_archive,
         super::skill_commands::preview_skill_import,
         super::skill_commands::install_skill_import,
         super::skill_commands::read_skill_file,
