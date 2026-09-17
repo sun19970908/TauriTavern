@@ -191,7 +191,9 @@ function SettingsApp({
             <SettingsSection title={tr('Chat Backups')} icon="fa-clock-rotate-left">
                 <SettingRow
                     label={tr('Automatic Chat Backups')}
-                    hint={tr('Create a backup automatically when an eligible chat save completes.')}
+                    helpTopic="automaticChatBackups"
+                    helpTitle={tr('Create a backup automatically when an eligible chat save completes.')}
+                    onHelp={showHelp}
                 >
                     <ToggleSwitch
                         checked={draft.chatBackups.automaticEnabled}
@@ -224,7 +226,9 @@ function SettingsApp({
 
                 <SettingRow
                     label={tr('Backups per character or group')}
-                    hint={tr('Maximum backups sharing the same character or group name.')}
+                    helpTopic="backupsPerCharacterOrGroup"
+                    helpTitle={tr('Maximum backups sharing the same character or group name.')}
+                    onHelp={showHelp}
                 >
                     <input
                         className="text_pole tt-settings-input"
@@ -332,6 +336,19 @@ function SettingsApp({
                         checked={draft.avatarPersonaOriginalImagesEnabled}
                         ariaLabel={tr('Enable Character/User Avatar Original Images')}
                         onChange={checked => controller.updateDraft('avatarPersonaOriginalImagesEnabled', checked)}
+                    />
+                </SettingRow>
+
+                <SettingRow
+                    label={tr('OLED Pure Black Background')}
+                    helpTopic="oledBackground"
+                    helpTitle={tr('Use pure black backgrounds and hide wallpaper on this device, keeping theme text and accent colors.')}
+                    onHelp={showHelp}
+                >
+                    <ToggleSwitch
+                        checked={draft.oledBackgroundEnabled}
+                        ariaLabel={tr('OLED Pure Black Background')}
+                        onChange={checked => controller.updateDraft('oledBackgroundEnabled', checked)}
                     />
                 </SettingRow>
 
