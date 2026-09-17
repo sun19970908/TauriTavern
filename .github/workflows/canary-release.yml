@@ -75,7 +75,6 @@ jobs:
             target_args: --debug --bundles nsis --features devtools-pilot
             artifact_prefix: debug-
             portable: false
-            pilot_config: true
           - platform: ubuntu-22.04
             target_args: --bundles appimage,deb,rpm
             artifact_prefix: ""
@@ -131,23 +130,6 @@ jobs:
             > "$config_path"
           echo "config_path=$config_path" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve Tauri --config argument
-        id: tauri-config-arg
-        shell: bash
-        env:
-          USE_PILOT_CONFIG: ${{ matrix.pilot_config }}
-          LINUX_CONFIG_PATH: ${{ steps.linux-version.outputs.config_path }}
-        run: |
-          set -euo pipefail
-          if [ "$USE_PILOT_CONFIG" = "true" ]; then
-            # tauri-action resolves relative --config against projectPath, so pass an absolute path.
-            echo "args=--config ${GITHUB_WORKSPACE}/src-tauri/crates/tauritavern/tauri.pilot.conf.json" >> "$GITHUB_OUTPUT"
-          elif [ -n "${LINUX_CONFIG_PATH}" ]; then
-            echo "args=--config ${LINUX_CONFIG_PATH}" >> "$GITHUB_OUTPUT"
-          else
-            echo "args=" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build desktop bundles
         uses: tauri-apps/tauri-action@v1
         env:
@@ -155,7 +137,9 @@ jobs:
         with:
           projectPath: src-tauri/crates/tauritavern
           tauriScript: node ../../../scripts/tauri-app.mjs
-          args: ${{ matrix.target_args }} ${{ steps.tauri-config-arg.outputs.args }}
+          args: >-
+            ${{ startsWith(matrix.platform, 'ubuntu-22.04') && format('{0} --config {1}', matrix.target_args, steps.linux-version.outputs.config_path) || matrix.target_args }}
+            ${{ matrix.artifact_prefix == 'debug-' && format('--config "{0}/src-tauri/crates/tauritavern/tauri.pilot.conf.json"', github.workspace) || '' }}
           uploadWorkflowArtifacts: true
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
