@@ -22,6 +22,8 @@
 
 </div>
 
+<p align="center"><sub>Agradecemos a <a href="https://github.com/shiyue137">@shiyue137</a> por criar o logo do TauriTavern 💛</sub></p>
+
 ## Baixar
 
 <div align="center">
@@ -87,7 +89,7 @@ O script identifica seu sistema e escolhe o método de instalação adequado. El
 **Versão estável**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Darkatse/TauriTavern/main/scripts/install-linux.sh | sh
+curl -fsSL https://get.tauritavern.com/linux.sh | sh
 ```
 
 **Nix / NixOS**
@@ -121,7 +123,7 @@ As compilações para Windows, macOS e dispositivos móveis estão disponíveis 
 **Linux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Darkatse/TauriTavern/main/scripts/install-linux.sh \
+curl -fsSL https://get.tauritavern.com/linux.sh \
   | sh -s -- --channel canary
 ```
 

@@ -22,6 +22,8 @@
 
 </div>
 
+<p align="center"><sub>Спасибо <a href="https://github.com/shiyue137">@shiyue137</a> за логотип TauriTavern 💛</sub></p>
+
 ## Скачать
 
 <div align="center">
@@ -87,7 +89,7 @@ yay -S tauritavern-bin
 **Стабильная версия**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Darkatse/TauriTavern/main/scripts/install-linux.sh | sh
+curl -fsSL https://get.tauritavern.com/linux.sh | sh
 ```
 
 **Nix / NixOS**
@@ -121,7 +123,7 @@ Canary обновляется ежедневно и включает новые 
 **Linux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Darkatse/TauriTavern/main/scripts/install-linux.sh \
+curl -fsSL https://get.tauritavern.com/linux.sh \
   | sh -s -- --channel canary
 ```
 
