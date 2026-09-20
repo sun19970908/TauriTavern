@@ -14,13 +14,13 @@ use crate::services::tool_request_gate::{ToolRequestGate, ToolRequestGateError};
 
 use crate::services::agent_tools::{
     AGENT_AWAIT, AGENT_DELEGATE, AGENT_HANDOFF, AGENT_LIST, AgentToolDispatchOutcome,
-    AgentToolEffect, AgentToolSession, TASK_RETURN, WORKSPACE_FINISH,
+    AgentToolEffect, AgentToolSession, TASK_RETURN, WORKSPACE_FINISH, WORKSPACE_SHELL,
 };
 use tt_domain::models::agent::{
     AgentInvocationExitPolicy, AgentRunEventLevel, AgentRunPresentation, AgentRunStatus,
     AgentToolResult, WorkspacePath,
 };
-use tt_domain::models::tool::{InvocationToolSnapshot, ToolId, ToolInvocation};
+use tt_domain::models::tool::{InvocationToolSnapshot, ToolArguments, ToolId, ToolInvocation};
 use tt_domain::text_metrics::TextMetrics;
 use tt_ports::mcp::{McpCallOutcome, McpKnownResponse};
 use tt_ports::workspace_fs::WorkspaceWriteGuard;
@@ -49,6 +49,7 @@ impl AgentRuntimeService {
         is_last_call: bool,
         commit_ledger: &mut RunCommitLedger,
         cancel: &mut super::AgentCancelReceiver,
+        auto_commit_candidate: Option<WorkspacePath>,
     ) -> Result<AgentToolDispatchOutcome, ToolCallFailure> {
         let mut started_tool = false;
         let result = async {
@@ -59,19 +60,28 @@ impl AgentRuntimeService {
             let tool_name = tool_invocation.tool_id.native_name();
             let snapshot_id = prepared.tool_snapshot.id().as_str();
             let arguments_ref = self.store_tool_arguments(run_id, invocation_id, round, tool_invocation).await?;
+            let mut payload = json!({
+                "round": round,
+                "invocationId": invocation_id,
+                "callId": tool_invocation.call_id.as_str(),
+                "toolId": tool_invocation.tool_id.as_str(),
+                "snapshotId": snapshot_id,
+                "name": tool_name,
+                "argumentsRef": arguments_ref.as_str(),
+            });
+            if tool_invocation.tool_id.is_builtin()
+                && tool_name == WORKSPACE_SHELL
+                && let ToolArguments::Object(args) = &tool_invocation.arguments
+                && let Some(command) = args.get("command")
+            {
+                // Keep the command as input data; Timeline owns its presentation.
+                payload["command"] = command.clone();
+            }
             self.event(
                 run_id,
                 AgentRunEventLevel::Info,
                 "tool_call_requested",
-                json!({
-                    "round": round,
-                    "invocationId": invocation_id,
-                    "callId": tool_invocation.call_id.as_str(),
-                    "toolId": tool_invocation.tool_id.as_str(),
-                    "snapshotId": snapshot_id,
-                    "name": tool_name,
-                    "argumentsRef": arguments_ref.as_str(),
-                }),
+                payload,
             )
             .await?;
             let active_run = self.active_run_handle(run_id).await?;
@@ -247,7 +257,7 @@ impl AgentRuntimeService {
                 }
             } else {
                 self.tool_dispatcher
-                    .dispatch(run_id, call, args, session, profile, active_run.files.clone())
+                    .dispatch(run_id, call, args, session, profile, active_run.files.clone(), cancel.clone(), auto_commit_candidate)
                     .await
             };
 
