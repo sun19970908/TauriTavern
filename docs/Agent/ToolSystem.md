@@ -10,7 +10,7 @@
 
 Invocation 使用的工具快照包含描述、参数、名称映射及预算上限，按工具目录、Profile 和结束方式创建；输出修订沿用原快照。每个 Invocation 的调用计数独立，由 `ToolRequestGate` 检查后进入内置工具或 MCP 的执行路径。
 
-新 Profile 默认启用 Shell；已有 Profile 和工具快照保持原工具集合。
+新 Profile 默认启用 Shell。
 
 ## 内置工具
 
@@ -20,15 +20,16 @@ Invocation 使用的工具快照包含描述、参数、名称映射及预算上
 | --- | --- |
 | 读取聊天 | `chat.search`、`chat.read_messages` |
 | 读取激活世界书 | `worldinfo.read_activated` |
-| 查找和使用 Skill | `skill.list`、`skill.search`、`skill.read`、`skill.run_script` |
-| 读取文件 | `workspace.list_files`、`workspace.search_files`、`workspace.read_file` |
+| 读取工作文件与 Skill | `workspace.list_files`、`workspace.search_files`、`workspace.read_file` |
 | 修改文件 | `workspace.write_file`、`workspace.apply_patch` |
-| Shell 与数据处理 | `workspace.shell`，内含 jq 与 Python |
+| Shell 与数据处理 | `workspace.shell`，内含 jq、Python 与 JavaScript |
 | 发布与结束 | `workspace.commit`、`workspace.finish` |
-| 委派与交接 | `agent.list`、`agent.delegate`、`agent.await`、`agent.handoff`、`task.return` |
+| 委派与交接 | `agent.delegate`、`agent.await`、`agent.handoff`、`task.return` |
 | 掷骰 | `dice.roll` |
 
 聊天工具读取 Run 输入对应的历史范围；文件读取使用 1-based 行号，聊天消息索引使用 0-based。较长文本可以分段读取。完整工具集合会按 Profile 收窄，return-mode 子 Agent 使用 `task.return` 作为结束工具。
+
+可调用 Agent 目录随提示词提供，协作方式与错误反馈见 [多 Agent 协作](SubAgent.md)。
 
 ## 参数
 
@@ -40,7 +41,7 @@ Invocation 使用的工具快照包含描述、参数、名称映射及预算上
 
 ## Shell
 
-`workspace.shell` 通过 Bashkit 内置命令处理批量文件操作、管道和数据转换，包含 jq 与 Monty 提供的 Python 子集（`python` / `python3`）。参数为 `command` 与可选 `workdir`（默认 `/`）。Shell 与 Python 每次执行创建新环境，共享的工作区文件保留；不执行宿主外部程序。退出状态与输出沿普通工具结果返回，文件和提交语义见 [Workspace](Workspace.md)。
+`workspace.shell` 提供 Bashkit 内置命令、jq、Python 子集与 JavaScript。参数为 `command` 与可选 `workdir`（默认 `/`）。每次调用创建新环境，共享工作区文件保留；不执行宿主外部程序。退出状态与输出沿普通工具结果返回，执行与文件契约见 [Workspace](Workspace.md)。
 
 ## 结果如何进入下一轮
 
@@ -52,7 +53,7 @@ Invocation 使用的工具快照包含描述、参数、名称映射及预算上
 
 MCP 提供外部工具。MCP Manager 管理服务器、发现目录和调用权限；Agent 使用已发现的工具目录，调用前由 MCP 服务确认权限。较长结果存为 `tool-results/` 下的可读文件，模型收到摘要和文件路径。配置与连接行为见 [MCP](../CurrentState/MCP.md)。
 
-Skill 提供按需读取的工作方法、材料和脚本。它沿用相同的工具调用路径，知识包本身的组织方式见 [Skill](Skill.md)。
+Skill 提供工作方法、材料和脚本，通过只读 `skills/` 视图与 `workspace.shell` 使用，组织与作用域见 [Skill](Skill.md)。
 
 ## 添加一个工具
 

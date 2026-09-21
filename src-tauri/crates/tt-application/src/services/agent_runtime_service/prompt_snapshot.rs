@@ -7,12 +7,64 @@ use tt_domain::models::agent::profile::{AgentContextPolicy, ResolvedAgentProfile
 use tt_domain::models::agent::{
     AgentModelContentPart, AgentModelMessage, AgentModelRequest, AgentModelRole, AgentModelTool,
 };
+use tt_domain::models::skill::SkillIndexEntry;
 use tt_domain::models::tool::ToolChoice;
 use tt_ports::repositories::chat_completion_repository::OPENAI_RESPONSES_WEBSOCKET_TRANSPORT;
 
 use super::invocation::model_session_id;
 
 const AGENT_PROMPT_MARKER_FIELD: &str = "_tauritavern_agent_prompt_marker";
+
+/// PromptManager supplies the component identity; its position and role belong
+/// to the preset. Append the invocation's available skills and agents together.
+pub(super) fn append_runtime_catalogs(
+    request: &mut ChatCompletionGenerateRequestDto,
+    skills: &[SkillIndexEntry],
+    agents: &str,
+) -> Result<(), ApplicationError> {
+    if skills.is_empty() && agents.is_empty() {
+        return Ok(());
+    }
+    let component = request.payload.get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .and_then(|messages| messages.iter_mut().find(|message| {
+            message.get("_tauritavern_prompt_component").and_then(Value::as_str)
+                == Some("agentSystemPrompt")
+        }))
+        .ok_or_else(|| ApplicationError::ValidationError(
+            "agent.system_prompt_component_missing: prompt snapshot must identify its agentSystemPrompt message".into()
+        ))?;
+    let Some(Value::String(content)) = component.get_mut("content") else {
+        return Err(ApplicationError::ValidationError(
+            "agent.system_prompt_invalid: agentSystemPrompt content must be text".into(),
+        ));
+    };
+    append_runtime_catalogs_text(content, skills, agents);
+    Ok(())
+}
+
+pub(super) fn append_runtime_catalogs_text(
+    text: &mut String,
+    skills: &[SkillIndexEntry],
+    agents: &str,
+) {
+    if !skills.is_empty() {
+        text.push_str("\n\nAvailable skills:\n");
+        for skill in skills {
+            let description =
+                serde_json::to_string(&skill.description).expect("a string is JSON serializable");
+            text.push_str(&format!(
+                "- {}: {description}\n  Path: skills/{}/SKILL.md\n",
+                skill.name, skill.name
+            ));
+        }
+        text.push_str("\nRead a skill's SKILL.md before using it. Resolve referenced files relative to its directory.");
+    }
+    if !agents.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(agents);
+    }
+}
 
 pub(super) fn request_from_prompt_snapshot(
     prompt_snapshot: &Value,
@@ -349,9 +401,9 @@ fn content_parts_from_openai_value(value: Option<Value>) -> Vec<AgentModelConten
 }
 
 /// Compile captured values once per invocation; readers share the immutable table.
-pub(super) fn frozen_macros_from_snapshot(
+pub(super) fn runtime_context_from_snapshot(
     snapshot: &Value,
-) -> Result<std::sync::Arc<tt_domain::frozen_macros::FrozenMacros>, ApplicationError> {
+) -> Result<std::sync::Arc<tt_ports::workspace_shell::WorkspaceShellContext>, ApplicationError> {
     let macros = snapshot
         .pointer("/frozenRunInputSnapshot/macroContext")
         .map(|context| {
@@ -362,7 +414,16 @@ pub(super) fn frozen_macros_from_snapshot(
         })
         .transpose()?
         .unwrap_or_default();
-    Ok(std::sync::Arc::new(macros))
+    Ok(std::sync::Arc::new(
+        tt_ports::workspace_shell::WorkspaceShellContext {
+            frozen_macros: std::sync::Arc::new(macros),
+            host: crate::services::agent_tools::build_script_context_json(snapshot)
+                .inspect_err(|error| {
+                    tracing::debug!(%error, "JavaScript chat context is unavailable");
+                })
+                .map_err(|error| error.to_string()),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -572,7 +633,7 @@ mod tests {
         };
 
         serde_json::from_value(json!({
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "kind": "tauritavern.agentProfile",
             "id": "test",
             "displayName": "Test",
@@ -601,9 +662,7 @@ mod tests {
             },
             "skills": {
                 "visible": ["*"],
-                "deny": [],
-                "maxReadCharsPerCall": 1,
-                "maxReadCharsPerRun": 1
+                "deny": []
             },
             "workspace": {
                 "visibleRoots": ["output"],

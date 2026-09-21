@@ -13,8 +13,8 @@ use crate::services::hashing::hex_lower;
 use crate::services::tool_request_gate::{ToolRequestGate, ToolRequestGateError};
 
 use crate::services::agent_tools::{
-    AGENT_AWAIT, AGENT_DELEGATE, AGENT_HANDOFF, AGENT_LIST, AgentToolDispatchOutcome,
-    AgentToolEffect, AgentToolSession, TASK_RETURN, WORKSPACE_FINISH, WORKSPACE_SHELL,
+    AGENT_AWAIT, AGENT_DELEGATE, AGENT_HANDOFF, AgentToolDispatchOutcome, AgentToolEffect,
+    AgentToolSession, TASK_RETURN, WORKSPACE_FINISH, WORKSPACE_SHELL,
 };
 use tt_domain::models::agent::{
     AgentInvocationExitPolicy, AgentRunEventLevel, AgentRunPresentation, AgentRunStatus,
@@ -95,10 +95,10 @@ impl AgentRuntimeService {
             ) {
                 let budget_message = match &rejection {
                     ToolRequestGateError::InvocationBudgetExhausted { max_calls } => Some(format!(
-                        "Agent tool call budget is exhausted for this invocation (max {max_calls})."
+                        "The tool call limit for this task has been reached ({max_calls} calls)."
                     )),
                     ToolRequestGateError::ToolBudgetExhausted { max_calls, .. } => Some(format!(
-                        "Agent profile tool call budget for `{tool_name}` is exhausted (max {max_calls})."
+                        "`{tool_name}` has reached its call limit for this task ({max_calls} calls)."
                     )),
                     _ => None,
                 };
@@ -183,8 +183,6 @@ impl AgentRuntimeService {
                     ),
                     started.elapsed().as_millis(),
                 ))
-            } else if builtin_name == Some(AGENT_LIST) {
-                self.dispatch_agent_list_tool(call, args, profile).await
             } else if builtin_name == Some(AGENT_DELEGATE) {
                 Box::pin(self.dispatch_agent_delegate_tool(
                     run_id,

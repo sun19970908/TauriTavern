@@ -7,7 +7,6 @@ use tokio::sync::watch;
 use super::chat;
 use super::dice;
 use super::session::AgentToolSession;
-use super::skill;
 use super::workspace;
 use super::world_info;
 use crate::errors::ApplicationError;
@@ -21,7 +20,6 @@ use tt_domain::models::tool::{ToolId, ToolInvocation};
 use tt_ports::repositories::agent_run_repository::AgentRunRepository;
 use tt_ports::repositories::chat_repository::ChatRepository;
 use tt_ports::repositories::group_chat_repository::GroupChatRepository;
-use tt_ports::skill_script::SkillScriptEngine;
 use tt_ports::workspace_fs::{WorkspaceFile, WorkspaceFs};
 use tt_ports::workspace_shell::WorkspaceShell;
 
@@ -45,12 +43,6 @@ pub(crate) enum AgentToolEffect {
         file: WorkspaceFile,
         replacements: usize,
         old_sha256: String,
-    },
-    /// 一次工具调用批量写入多个工作区文件（如 skill 脚本的最终 delta）。
-    /// 所有文件进入 journal / 事件；最后一次 mutation 单独供 auto-commit 使用。
-    WorkspaceFilesWritten {
-        files: Vec<WorkspaceFile>,
-        last_text_mutation: Option<WorkspacePath>,
     },
     /// Direct filesystem operations need only a publication candidate, not a text delta.
     AutoCommitCandidateUpdated {
@@ -78,7 +70,6 @@ pub(crate) struct AgentToolDispatcher {
     chat_repository: Arc<dyn ChatRepository>,
     group_chat_repository: Arc<dyn GroupChatRepository>,
     skill_service: Arc<SkillService>,
-    skill_script_engine: Arc<dyn SkillScriptEngine>,
     workspace_shell: Arc<dyn WorkspaceShell>,
 }
 
@@ -88,7 +79,6 @@ impl AgentToolDispatcher {
         chat_repository: Arc<dyn ChatRepository>,
         group_chat_repository: Arc<dyn GroupChatRepository>,
         skill_service: Arc<SkillService>,
-        skill_script_engine: Arc<dyn SkillScriptEngine>,
         workspace_shell: Arc<dyn WorkspaceShell>,
     ) -> Self {
         Self {
@@ -96,7 +86,6 @@ impl AgentToolDispatcher {
             chat_repository,
             group_chat_repository,
             skill_service,
-            skill_script_engine,
             workspace_shell,
         }
     }
@@ -120,6 +109,11 @@ impl AgentToolDispatcher {
         let workspace = ScopedWorkspaceFs::new(
             raw_files.clone(),
             WorkspaceAccessPolicy::from_profile(profile),
+        )
+        .with_skills(
+            self.skill_service.file_repository(),
+            session.effective_skills.clone(),
+            session.runtime_context.frozen_macros.clone(),
         );
         let outcome = match builtin_tool_name(&call.tool_id)? {
             chat::CHAT_SEARCH => {
@@ -130,7 +124,7 @@ impl AgentToolDispatcher {
                     run_id,
                     call,
                     args,
-                    &session.frozen_macros,
+                    &session.runtime_context.frozen_macros,
                 )
                 .await?
             }
@@ -142,7 +136,7 @@ impl AgentToolDispatcher {
                     run_id,
                     call,
                     args,
-                    &session.frozen_macros,
+                    &session.runtime_context.frozen_macros,
                 )
                 .await?
             }
@@ -153,29 +147,6 @@ impl AgentToolDispatcher {
                 world_info::read_activated(&prompt_snapshot, call, args)?
             }
             dice::DICE_ROLL => dice::roll(call, args).await?,
-            skill::SKILL_LIST => skill::list(call, session, profile).await?,
-            skill::SKILL_SEARCH => {
-                skill::search(self.skill_service.as_ref(), call, args, session, profile).await?
-            }
-            skill::SKILL_READ => {
-                skill::read(self.skill_service.as_ref(), call, args, session, profile).await?
-            }
-            skill::SKILL_SCRIPT => {
-                let prompt_snapshot = Self::read_run_prompt_snapshot(raw_files.as_ref()).await?;
-                skill::script(
-                    skill::ScriptContext {
-                        skill_service: self.skill_service.as_ref(),
-                        engine: self.skill_script_engine.as_ref(),
-                        workspace: &workspace,
-                        prompt_snapshot,
-                    },
-                    call,
-                    args,
-                    session,
-                    profile,
-                )
-                .await?
-            }
             workspace::WORKSPACE_LIST_FILES => {
                 workspace::list_files(&workspace, call, args).await?
             }
@@ -195,6 +166,7 @@ impl AgentToolDispatcher {
                 workspace::shell(
                     self.workspace_shell.as_ref(),
                     Arc::new(workspace.track_text_mutations(auto_commit_candidate)),
+                    session.runtime_context.clone(),
                     call,
                     args,
                     cancel,

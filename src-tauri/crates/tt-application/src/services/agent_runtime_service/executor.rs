@@ -11,7 +11,7 @@ use super::error_payload::{run_failure_payload, run_partial_success_payload};
 use super::invocation::model_session_id;
 use super::loop_runner::AgentLoopExit;
 use super::prompt_snapshot::{
-    frozen_macros_from_snapshot, prepare_agent_tool_request, request_summary,
+    prepare_agent_tool_request, request_summary, runtime_context_from_snapshot,
 };
 use super::tool_snapshot::tool_snapshot_summary;
 use super::{AgentCancelReceiver, AgentRuntimeService, PreparedInvocation};
@@ -338,6 +338,10 @@ impl AgentRuntimeService {
         self.resolve_model_binding(run_id, &resolved_profile, &mut request)
             .await?;
         self.ensure_not_cancelled(cancel)?;
+        let agents = self
+            .agent_catalog(&resolved_profile, &visible_tools)
+            .await?;
+        super::prompt_snapshot::append_runtime_catalogs(&mut request, &effective_skills, &agents)?;
         let request = prepare_agent_tool_request(
             request,
             &visible_tools,
@@ -371,7 +375,7 @@ impl AgentRuntimeService {
         self.ensure_not_cancelled(cancel)?;
 
         state.foreground = Some(InvocationFrame::new(PreparedInvocation {
-            frozen_macros: frozen_macros_from_snapshot(&prompt_snapshot)?,
+            runtime_context: runtime_context_from_snapshot(&prompt_snapshot)?,
             invocation: root_invocation,
             delegation_task_id: None,
             profile: resolved_profile,

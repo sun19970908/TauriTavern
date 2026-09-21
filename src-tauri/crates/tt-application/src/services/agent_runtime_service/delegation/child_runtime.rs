@@ -13,8 +13,8 @@ use crate::services::agent_runtime_service::commit_ledger::RunCommitLedger;
 use crate::services::agent_runtime_service::continuation::InvocationFrame;
 use crate::services::agent_runtime_service::model_stream_projection::clear_live_invocation;
 use crate::services::agent_runtime_service::prompt_snapshot::{
-    frozen_macros_from_snapshot, prepare_agent_tool_request, request_from_prompt_snapshot,
-    request_summary,
+    prepare_agent_tool_request, request_from_prompt_snapshot, request_summary,
+    runtime_context_from_snapshot,
 };
 use crate::services::agent_runtime_service::skill_scope::{
     skill_event_summary, skill_scope_order_for_profile,
@@ -298,6 +298,7 @@ impl AgentRuntimeService {
                 json!([
                     {
                         "role": "system",
+                        "_tauritavern_prompt_component": "agentSystemPrompt",
                         "content": system_prompt
                     },
                     {
@@ -310,6 +311,15 @@ impl AgentRuntimeService {
         };
         self.resolve_model_binding(run_id, &profile, &mut request)
             .await?;
+        let (skill_scope_order, effective_skills) = self
+            .resolve_child_effective_skills(&profile, &run.skill_scope_refs)
+            .await?;
+        let agents = self.agent_catalog(&profile, &visible_tools).await?;
+        super::super::prompt_snapshot::append_runtime_catalogs(
+            &mut request,
+            &effective_skills,
+            &agents,
+        )?;
         let request = prepare_agent_tool_request(
             request,
             &visible_tools,
@@ -336,9 +346,6 @@ impl AgentRuntimeService {
         .await?;
         self.ensure_not_cancelled(cancel)?;
 
-        let (skill_scope_order, effective_skills) = self
-            .resolve_child_effective_skills(&profile, &run.skill_scope_refs)
-            .await?;
         let resolved_skills = serde_json::to_string_pretty(&effective_skills).map_err(|error| {
             ApplicationError::ValidationError(format!(
                 "agent.resolved_skills_serialize_failed: {error}"
@@ -369,7 +376,7 @@ impl AgentRuntimeService {
         .await?;
 
         Ok(PreparedInvocation {
-            frozen_macros: frozen_macros_from_snapshot(&prompt_snapshot)?,
+            runtime_context: runtime_context_from_snapshot(&prompt_snapshot)?,
             invocation,
             delegation_task_id: Some(task.id.clone()),
             profile,

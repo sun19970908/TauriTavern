@@ -9,12 +9,11 @@ use tokio::sync::Semaphore;
 
 use crate::app::{AppServices, StartupProfile};
 use crate::infrastructure::apis::http_external_import_downloader::HttpExternalImportDownloader;
-use tt_adapter_bashkit::BashkitWorkspaceShell;
 use tt_adapter_http::HttpClientPool;
 use tt_adapter_mcp::RmcpMcpGateway;
-use tt_adapter_quickjs::QuickJsScriptEngine;
 use tt_adapter_storage_core::file_system::DataDirectory;
 use tt_adapter_triviumdb::TriviumDatabaseBackend;
+use tt_adapter_workspace_shell::WorkspaceShellEngine;
 use tt_application::services::asset_service::AssetService;
 use tt_application::services::avatar_service::AvatarService;
 use tt_application::services::background_service::BackgroundService;
@@ -53,7 +52,6 @@ use tt_application::services::user_service::UserService;
 use tt_application::services::vector_service::VectorService;
 use tt_application::services::world_info_service::WorldInfoService;
 use tt_domain::errors::DomainError;
-use tt_ports::skill_script::SkillScriptEngine;
 use tt_ports::user_endpoint_access::UserEndpointGrantRuntime;
 
 use super::{adapters, repositories};
@@ -145,7 +143,6 @@ pub(super) async fn build(
     let searxng_search_service = Arc::new(SearxngSearchService::new(
         repositories.searxng_search_repository.clone(),
     ));
-    let skill_script_engine: Arc<dyn SkillScriptEngine> = Arc::new(QuickJsScriptEngine::new());
     let vector_service = Arc::new(VectorService::new(
         repositories.vector_repository.clone(),
         repositories.remote_embedding_repository.clone(),
@@ -159,8 +156,7 @@ pub(super) async fn build(
         chat_completion_service.clone(),
         llm_connection_service.clone(),
         mcp_service.clone(),
-        skill_script_engine,
-        Arc::new(BashkitWorkspaceShell),
+        Arc::new(WorkspaceShellEngine),
     );
     let tokenization_service = Arc::new(TokenizationService::new(
         repositories.tokenizer_repository.clone(),

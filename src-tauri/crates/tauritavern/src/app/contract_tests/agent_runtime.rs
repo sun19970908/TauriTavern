@@ -6,11 +6,13 @@ use tt_domain::models::agent::{
 
 mod delegation;
 mod execution;
+mod legacy_revision;
 mod mcp;
 mod model_binding;
 mod persist;
 mod resume;
 mod shell;
+mod skill_workspace;
 mod task_details;
 
 fn allow_profile_tool(allow: &mut Vec<String>, name: &str) {

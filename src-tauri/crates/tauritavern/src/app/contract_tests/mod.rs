@@ -14,8 +14,6 @@ use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use tt_adapter_bashkit::BashkitWorkspaceShell;
-use tt_adapter_quickjs::QuickJsScriptEngine;
 use tt_adapter_storage_core::chat_directory_identity::new_shared_chat_alias_store_for_user_dir;
 use tt_adapter_storage_core::{FileChatRepository, FileSettingsRepository};
 use tt_adapter_storage_core::{FileLlmConnectionRepository, FileMcpServerRepository};
@@ -27,6 +25,7 @@ use tt_adapter_storage_userdata::FileWorldInfoRepository;
 use tt_adapter_storage_userdata::png_card_metadata::{
     read_character_data_from_png, write_character_data_to_png,
 };
+use tt_adapter_workspace_shell::WorkspaceShellEngine;
 use tt_application::dto::agent_dto::{
     AgentResolveChatCommitDto, AgentResolvePersistentStateMetadataUpdateDto, AgentRunHandleDto,
     AgentSkillScopeRefsDto, AgentStartRunDto, AgentStartRunOptionsDto,
@@ -91,6 +90,7 @@ mod agent_runtime;
 mod character;
 mod chat_payload_commit;
 mod host_resources;
+mod profile_migration;
 
 struct AgentRuntimeFixture {
     service: Arc<AgentRuntimeService>,
@@ -185,7 +185,7 @@ fn agent_runtime_fixture_with_results(
     root: &Path,
     responses: Vec<Result<Value, ApplicationError>>,
 ) -> AgentRuntimeFixture {
-    agent_runtime_fixture_with_shell(root, responses, Arc::new(BashkitWorkspaceShell))
+    agent_runtime_fixture_with_shell(root, responses, Arc::new(WorkspaceShellEngine))
 }
 
 fn agent_runtime_fixture_with_shell(
@@ -252,7 +252,6 @@ fn agent_runtime_fixture_with_shell(
         llm_connection_service,
         prompt_assembly_service,
         mcp_service.clone(),
-        Arc::new(QuickJsScriptEngine::new()),
         shell,
     ));
 
@@ -685,22 +684,6 @@ async fn read_workspace_json(repository: &FileAgentRepository, run_id: &str, pat
     serde_json::from_str(&file.text).expect("parse workspace json")
 }
 
-fn tool_result_structured_values(request: &AgentModelRequest, name: &str) -> Vec<Value> {
-    request
-        .messages
-        .iter()
-        .flat_map(|message| message.parts.iter())
-        .filter_map(|part| match part {
-            AgentModelContentPart::ToolResult { result }
-                if result.tool_id.is_builtin() && result.tool_id.native_name() == name =>
-            {
-                Some(result.structured.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 async fn wait_for_closed_sessions(gateway: &MockAgentModelGateway, expected: Vec<String>) {
     let mut expected = expected;
     expected.sort();
@@ -724,6 +707,10 @@ fn chat_request(user_content: &str) -> ChatCompletionGenerateRequestDto {
             "chat_completion_source": "openai",
             "model": "test-model",
             "messages": [{
+                "role": "system",
+                "content": "Use the available Agent tools.",
+                "_tauritavern_prompt_component": "agentSystemPrompt"
+            }, {
                 "role": "user",
                 "content": user_content
             }]
