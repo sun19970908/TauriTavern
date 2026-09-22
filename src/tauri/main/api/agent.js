@@ -10,6 +10,8 @@ import { createSharedRunEventSubscribe } from './agent-run-event-subscription.js
 import { createAgentRunLiveSubscribe } from './agent-run-live-subscription.js';
 import { normalizeAgentRunOptions } from './agent-run-options.js';
 import { createAgentRunRuntimeApi } from './agent-run-runtime.js';
+import { createAgentSessionsApi } from './agent-sessions.js';
+import { createAgentToolsApi } from './agent-tools.js';
 import { confirmEmptyAgentPersist } from '../adapters/st/agent-empty-persist-popup.js';
 import { DEFAULT_AGENT_PROFILE_ID } from '../../../scripts/tauritavern/agent/agent-system-settings.js';
 import { ensureModelTargetLlmConnectionForProfile } from '../../../scripts/tauritavern/agent/model-target-llm-connection.js';
@@ -107,6 +109,7 @@ export function createAgentApi({ safeInvoke, loadScript = () => import('../../..
             throw new Error('agent.resume_rounds_invalid: additionalRounds must be a non-negative integer');
         }
         checkpoint ??= await readCheckpoint(runId);
+        if (checkpoint.run.sessionId) throw new Error('agent.session_resume_unsupported: Session runs cannot be resumed');
         if (checkpoint.run.runId !== runId) throw new Error('agent.resume_checkpoint_mismatch: checkpoint belongs to another run');
         const revision = revisionGuidance !== null;
         if (checkpoint.blockedReason || (!revision && checkpoint.nextStep === 'finished')) {
@@ -170,10 +173,6 @@ export function createAgentApi({ safeInvoke, loadScript = () => import('../../..
         });
     }
 
-    async function listTools() {
-        return safeInvoke('list_agent_tools');
-    }
-
     async function copyChatPersistentStates(input) {
         return safeInvoke('copy_agent_chat_persistent_states', { dto: input });
     }
@@ -201,9 +200,8 @@ export function createAgentApi({ safeInvoke, loadScript = () => import('../../..
         subscribeLiveProjection,
         settleChatPresentation,
         profiles,
-        tools: {
-            list: listTools,
-        },
+        sessions: createAgentSessionsApi({ safeInvoke, promptAssembly }),
+        tools: createAgentToolsApi({ safeInvoke }),
         promptAssembly,
         approveToolCall() {
             throw new Error('approveToolCall is not implemented');

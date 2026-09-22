@@ -115,13 +115,16 @@ async fn agent_runtime_executes_cached_mcp_tool_through_readable_alias() {
             _ => None,
         })
         .expect("MCP result returned to model");
-    assert!(mcp_result.content.contains("too large to include here"));
+    assert!(mcp_result.content.contains("preview"));
     assert!(mcp_result.content.contains("workspace_read_file"));
-    assert!(mcp_result.content.contains("## Prefix preview"));
+    assert_eq!(mcp_result.content.matches('界').count(), 3_000);
+    assert!(!mcp_result.content.contains("End of result."));
+    assert!(mcp_result.content.chars().count() < 10_000);
     assert_eq!(mcp_result.structured["externalized"], true);
     assert_eq!(mcp_result.structured["charLimit"], 10_000);
     let readable_path = mcp_result.structured["path"].as_str().unwrap();
     let audit_path = mcp_result.structured["auditPath"].as_str().unwrap();
+    assert!(mcp_result.content.contains(readable_path));
     assert_eq!(
         readable_path,
         "tool-results/inv_root/round-001-call_fe79da5f09df9787.txt"
@@ -136,7 +139,10 @@ async fn agent_runtime_executes_cached_mcp_tool_through_readable_alias() {
         vec![readable_path.to_string(), audit_path.to_string()]
     );
     let stored = read_workspace_json(&fixture.agent_repository, &handle.run_id, audit_path).await;
-    assert_eq!(stored["content"].as_str().unwrap().len(), 60_000);
+    assert_eq!(
+        stored["content"].as_str().unwrap().matches('界').count(),
+        60_000
+    );
     assert_eq!(stored["structured"]["structuredContent"]["issueId"], 42);
     let readable = fixture
         .agent_repository
@@ -152,7 +158,6 @@ async fn agent_runtime_executes_cached_mcp_tool_through_readable_alias() {
             .lines()
             .all(|line| line.chars().count() <= 3_000)
     );
-    assert!(readable.text.contains(&"x".repeat(3_000)));
     let read_result = requests[2]
         .messages
         .iter()
@@ -167,7 +172,8 @@ async fn agent_runtime_executes_cached_mcp_tool_through_readable_alias() {
         })
         .expect("Agent can read the externalized MCP result through workspace VFS");
     assert_eq!(read_result.structured["fullRead"], true);
-    assert!(read_result.content.contains(&"x".repeat(3_000)));
+    assert_eq!(read_result.content.matches('界').count(), 60_000);
+    assert!(read_result.content.contains("End of result."));
 
     let _ = fs::remove_dir_all(root).await;
 }
@@ -220,10 +226,10 @@ async fn agent_runtime_stops_after_unknown_mcp_call_outcome() {
     let error = fixture
         .service
         .resume_run(tt_application::dto::agent_dto::AgentResumeRunDto {
-            run_id: run.id,
+            run_id: run.id.clone(),
             expected_terminal_seq: checkpoint.terminal_seq,
-            chat_ref: run.chat_ref,
-            stable_chat_id: run.stable_chat_id,
+            chat_ref: run.chat_target().unwrap().chat_ref.clone(),
+            stable_chat_id: run.chat_target().unwrap().stable_chat_id.clone(),
             additional_rounds: 0,
             host_presentation: false,
             revision: None,
@@ -255,7 +261,7 @@ pub(super) async fn configure_mcp_profile(
     fixture: &AgentRuntimeFixture,
     profile_id: &str,
     max_rounds: usize,
-    mcp_result_inline_char_limit: usize,
+    external_result_inline_char_limit: usize,
 ) -> (
     tt_domain::models::agent::profile::ResolvedAgentProfile,
     String,
@@ -300,7 +306,7 @@ pub(super) async fn configure_mcp_profile(
     let mcp_tool_id = format!("mcp/{}:issue.create", server.id);
     definition.tools.allow.push(mcp_tool_id.clone());
     definition.tools.max_rounds = max_rounds;
-    definition.tools.mcp_result_inline_char_limit = mcp_result_inline_char_limit;
+    definition.tools.external_result_inline_char_limit = external_result_inline_char_limit;
     fixture
         .profile_service
         .save_profile(definition, fixture.service.tool_catalog())

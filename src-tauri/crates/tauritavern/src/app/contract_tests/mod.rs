@@ -101,6 +101,7 @@ struct AgentRuntimeFixture {
     model_gateway: Arc<MockAgentModelGateway>,
     mcp_service: Arc<McpService>,
     mcp_gateway: Arc<ContractMcpGateway>,
+    extension_tools: Arc<crate::infrastructure::agent_extension_tools::AgentExtensionTools>,
 }
 
 fn temp_root(label: &str) -> PathBuf {
@@ -216,6 +217,7 @@ fn agent_runtime_fixture_with_shell(
         profile_repository,
         profile_health_repository,
         preset_repository.clone(),
+        agent_repository.clone(),
     ));
     let skill_service = Arc::new(SkillService::new(Arc::new(FileSkillRepository::new(
         root.join("_tauritavern/skills"),
@@ -240,8 +242,12 @@ fn agent_runtime_fixture_with_shell(
         Arc::new(FileMcpServerRepository::new(root.join("_tauritavern/mcp"))),
         mcp_gateway.clone(),
     ));
+    let extension_tools =
+        Arc::new(crate::infrastructure::agent_extension_tools::AgentExtensionTools::default());
     let service = Arc::new(AgentRuntimeService::new(
         agent_repository.clone() as Arc<dyn AgentRunRepository>,
+        agent_repository.clone()
+            as Arc<dyn tt_ports::repositories::agent_session_repository::AgentSessionRepository>,
         agent_repository.clone() as Arc<dyn AgentInvocationRepository>,
         agent_repository.clone() as Arc<dyn WorkspaceRepository>,
         chat_file_repository.clone() as Arc<dyn ChatRepository>,
@@ -253,6 +259,7 @@ fn agent_runtime_fixture_with_shell(
         prompt_assembly_service,
         mcp_service.clone(),
         shell,
+        extension_tools.clone(),
     ));
 
     AgentRuntimeFixture {
@@ -264,6 +271,7 @@ fn agent_runtime_fixture_with_shell(
         model_gateway,
         mcp_service,
         mcp_gateway,
+        extension_tools,
     }
 }
 
@@ -407,17 +415,21 @@ fn contract_run(
     AgentRun {
         id: id.to_string(),
         workspace_id: format!("{id}_workspace"),
-        stable_chat_id: format!("{id}_stable_chat"),
-        chat_ref: AgentChatRef::Character {
-            character_id: "Alice".to_string(),
-            file_name: "Alice.png".to_string(),
-        },
-        generation_type: "normal".to_string(),
+        target: tt_domain::models::agent::AgentRunTarget::Chat(
+            tt_domain::models::agent::AgentChatRunTarget {
+                stable_chat_id: format!("{id}_stable_chat"),
+                chat_ref: AgentChatRef::Character {
+                    character_id: "Alice".to_string(),
+                    file_name: "Alice.png".to_string(),
+                },
+                generation_type: "normal".to_string(),
+                skill_scope_refs: Default::default(),
+                persist_base_state_id: None,
+                input_message_count: None,
+                presentation,
+            },
+        ),
         profile_id: Some(profile.id.as_str().to_string()),
-        skill_scope_refs: Default::default(),
-        persist_base_state_id: None,
-        input_message_count: None,
-        presentation,
         status: AgentRunStatus::Created,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -761,11 +773,11 @@ impl PresetRepository for TestPresetRepository {
         Ok(())
     }
 
-    async fn delete_preset(
-        &self,
-        _name: &str,
-        _preset_type: &PresetType,
-    ) -> Result<(), DomainError> {
+    async fn delete_preset(&self, name: &str, preset_type: &PresetType) -> Result<(), DomainError> {
+        self.presets
+            .lock()
+            .await
+            .remove(&(name.to_string(), preset_type.clone()));
         Ok(())
     }
 
@@ -868,7 +880,7 @@ impl McpGateway for ContractMcpGateway {
                 is_error: false,
                 text: vec![McpTextContent {
                     index: 0,
-                    text: "x".repeat(60_000),
+                    text: format!("{}\nEnd of result.", "界".repeat(60_000)),
                 }],
                 structured_content: Some(json!({ "issueId": 42 })),
                 diagnostics: Vec::new(),

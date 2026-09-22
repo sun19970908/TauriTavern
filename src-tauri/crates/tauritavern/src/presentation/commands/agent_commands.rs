@@ -12,7 +12,7 @@ use crate::presentation::errors::CommandError;
 use tt_application::dto::agent_dto::{
     AgentApplyCurrentModelConnectionSnapshotDto, AgentApplyCurrentModelConnectionSnapshotResultDto,
     AgentApplyRunPruneDto, AgentBuildCurrentModelConnectionSnapshotDto,
-    AgentBuildCurrentModelConnectionSnapshotResultDto, AgentCancelRunDto,
+    AgentBuildCurrentModelConnectionSnapshotResultDto, AgentCancelRunDto, AgentCancelRunResultDto,
     AgentCopyChatPersistentStatesDto, AgentFinishRunPresentationDto, AgentListProfilesResultDto,
     AgentListRunsDto, AgentListRunsResultDto, AgentListToolsResultDto, AgentLoadProfileResultDto,
     AgentModelTurnDisplayDto, AgentPlanRunPruneDto, AgentPreparePromptAssemblyDto,
@@ -113,7 +113,7 @@ pub async fn subscribe_agent_run_live_projection(
     else {
         let _ = channel.send(AgentRunLiveUpdateDto::Snapshot {
             calls: Vec::new(),
-            reasoning: Vec::new(),
+            responses: Vec::new(),
         });
         return Ok(());
     };
@@ -173,7 +173,12 @@ pub async fn prepare_agent_prompt_assembly(
     app_state
         .services
         .prompt_assembly_service
-        .prepare_frontend_prompt_assembly(dto, profile, &visible_tools)
+        .prepare_frontend_prompt_assembly(
+            dto,
+            profile,
+            &visible_tools,
+            tt_domain::models::agent::AgentInvocationExitPolicy::RunFinishAllowed,
+        )
         .await
         .map_err(map_command_error("Failed to prepare agent prompt assembly"))
 }
@@ -240,6 +245,7 @@ pub async fn list_agent_profiles(
 
 #[tauri::command]
 pub async fn list_agent_tools(
+    dto: Option<tt_application::dto::agent_dto::AgentListToolsDto>,
     app_state: State<'_, Arc<AppState>>,
 ) -> Result<AgentListToolsResultDto, CommandError> {
     log_command("list_agent_tools");
@@ -247,7 +253,7 @@ pub async fn list_agent_tools(
     app_state
         .services
         .agent_runtime_service
-        .tool_catalog_items()
+        .tool_catalog_items(dto.unwrap_or_default().context)
         .await
         .map_err(map_command_error("Failed to list agent tools"))
 }
@@ -313,11 +319,8 @@ pub async fn save_agent_profile(
 
     app_state
         .services
-        .agent_profile_service
-        .save_profile(
-            dto.profile,
-            app_state.services.agent_runtime_service.tool_catalog(),
-        )
+        .agent_runtime_service
+        .save_profile(dto.profile)
         .await
         .map_err(map_command_error("Failed to save agent profile"))
 }
@@ -368,12 +371,13 @@ pub async fn retarget_agent_profile_preset_refs(
         .retarget_preset_refs(dto.from, dto.to)
         .await
         .map(|result| AgentRetargetPresetRefsResultDto {
-            updated: result.profile_ids.len(),
+            updated: result.profile_ids.len() + usize::from(result.session_profile_updated),
             profile_ids: result
                 .profile_ids
                 .iter()
                 .map(|id| id.as_str().to_string())
                 .collect(),
+            session_profile_updated: result.session_profile_updated,
         })
         .map_err(map_command_error(
             "Failed to retarget agent profile preset refs",
@@ -384,7 +388,7 @@ pub async fn retarget_agent_profile_preset_refs(
 pub async fn cancel_agent_run(
     dto: AgentCancelRunDto,
     app_state: State<'_, Arc<AppState>>,
-) -> Result<AgentRunHandleDto, CommandError> {
+) -> Result<AgentCancelRunResultDto, CommandError> {
     log_command("cancel_agent_run");
 
     app_state

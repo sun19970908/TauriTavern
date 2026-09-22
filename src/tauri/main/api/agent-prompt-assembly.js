@@ -9,6 +9,7 @@ import {
     normalizeAgentSystemPrompt,
 } from '../../../scripts/tauritavern/agent/agent-system-prompt.js';
 import { normalizeFrozenRunInputSnapshot } from '../../../scripts/tauritavern/agent/frozen-run-input-snapshot.js';
+import { createAgentPromptSnapshot } from '../../../scripts/tauritavern/agent/agent-model-messages.js';
 
 const PROMPT_ASSEMBLY_SOURCE = 'frontend-prompt-assembly-broker';
 
@@ -16,10 +17,21 @@ const PROMPT_ASSEMBLY_SOURCE = 'frontend-prompt-assembly-broker';
  * Builds an Agent PromptSnapshot through the real SillyTavern chat-completion
  * PromptManager pipeline, using frozen prompt inputs and preset settings.
  *
- * @param {Record<string, any>} input
- * @returns {Promise<{ promptSnapshot: { contextPolicy: any; chatCompletionPayload: any; worldInfoActivation?: any }; frozenRunInputSnapshot: any; generationIntent: any; assembly: any }>}
+ * @param {Record<string, unknown>} input
  */
 export async function buildPromptAssemblySnapshot(input = {}) {
+    const { payload, snapshotMetadata, ...assembled } = await buildPromptAssemblyPayload(input);
+    return {
+        ...assembled,
+        promptSnapshot: createAgentPromptSnapshot(payload, snapshotMetadata),
+    };
+}
+
+/**
+ * Raw assembly boundary for Chat's compatibility event, before canonical conversion.
+ * @param {Record<string, unknown>} input
+ */
+export async function buildPromptAssemblyPayload(input = {}) {
     const request = await normalizePromptAssemblyRequest(input);
     const openai = await import('../../../scripts/openai.js');
     if (request.modelId && !hasChatCompletionSource(request.settings)) {
@@ -42,16 +54,19 @@ export async function buildPromptAssemblySnapshot(input = {}) {
         agentContextPolicy: request.agentContextPolicy,
         agentSystemPrompt: request.agentSystemPrompt,
         agentTaskPrompt: request.agentTaskPrompt,
+        contextKind: request.frozenRunInputSnapshot.contextKind ?? 'chat',
     });
 
-    const payload = result.chatCompletionPayload;
-    assertNoExternalTools(payload);
-    assertNoExternalToolTurns(payload.messages);
+    if (request.frozenRunInputSnapshot.contextKind === 'session') {
+        // JSONL owns the full history; the Run retains only the budgeted prompt messages.
+        delete request.frozenRunInputSnapshot.promptInputs.agentMessages;
+    }
 
+    const payload = result.chatCompletionPayload;
     return {
-        promptSnapshot: {
+        payload,
+        snapshotMetadata: {
             contextPolicy: request.agentContextPolicy,
-            chatCompletionPayload: payload,
             ...(request.worldInfoActivation ? { worldInfoActivation: request.worldInfoActivation } : {}),
         },
         frozenRunInputSnapshot: request.frozenRunInputSnapshot,
@@ -69,6 +84,7 @@ export async function buildPromptAssemblySnapshot(input = {}) {
     };
 }
 
+/** @param {Record<string, unknown>} input */
 async function normalizePromptAssemblyRequest(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) {
         throw new Error('prompt_assembly.input_invalid: input must be an object');
@@ -139,6 +155,7 @@ async function normalizePromptAssemblyRequest(input) {
     };
 }
 
+/** @param {Record<string, unknown>} input */
 function normalizeRequiredFrozenRunInputSnapshot(input) {
     const snapshot = input.frozenRunInputSnapshot ?? input.frozen_run_input_snapshot;
     if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
@@ -147,6 +164,7 @@ function normalizeRequiredFrozenRunInputSnapshot(input) {
     return normalizeFrozenRunInputSnapshot(snapshot);
 }
 
+/** @param {Record<string, unknown>} input */
 function normalizeSettings(input) {
     const settings = input.settings ?? input.presetSettings ?? input.preset_settings;
     if (settings == null) {
@@ -156,20 +174,24 @@ function normalizeSettings(input) {
     return requirePlainObject(settings, 'prompt_assembly.settings_invalid: settings must be an object');
 }
 
+/** @param {unknown} value */
 function normalizeGenerationType(value) {
     return String(value || 'normal').trim() || 'normal';
 }
 
+/** @param {unknown} value */
 function normalizeOptionalString(value) {
     const text = String(value ?? '').trim();
     return text || undefined;
 }
 
+/** @param {unknown} value */
 function normalizeOptionalPrompt(value) {
     const text = String(value ?? '');
     return text.trim() ? text : null;
 }
 
+/** @param {unknown} value */
 function normalizeRequiredAgentPromptComponents(value) {
     if (value == null) {
         return [];
@@ -182,40 +204,20 @@ function normalizeRequiredAgentPromptComponents(value) {
         .filter(Boolean);
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} message
+ * @returns {Record<string, unknown>}
+ */
 function requirePlainObject(value, message) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw new Error(message);
     }
-    return value;
+    return /** @type {Record<string, unknown>} */ (value);
 }
 
+/** @param {Record<string, unknown>} settings */
 function hasChatCompletionSource(settings) {
     return typeof settings?.chat_completion_source === 'string'
         && settings.chat_completion_source.trim().length > 0;
-}
-
-function assertNoExternalTools(payload) {
-    const tools = payload?.tools;
-    if (Array.isArray(tools) && tools.length > 0) {
-        throw new Error('agent.external_tools_unsupported: Agent runtime owns the tool registry');
-    }
-    if (Object.prototype.hasOwnProperty.call(payload || {}, 'tool_choice')) {
-        throw new Error('agent.external_tool_choice_unsupported: Agent runtime owns tool choice');
-    }
-}
-
-function assertNoExternalToolTurns(messages) {
-    if (!Array.isArray(messages)) {
-        throw new Error('agent.prompt_snapshot_messages_required: prompt assembly did not produce chat-completion messages');
-    }
-
-    const hasToolTurn = messages.some((message) => {
-        const role = String(message?.role || '').toLowerCase();
-        return role === 'tool'
-            || (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0);
-    });
-
-    if (hasToolTurn) {
-        throw new Error('agent.external_tool_turns_unsupported: prompt snapshot already contains tool turns');
-    }
 }

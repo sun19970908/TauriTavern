@@ -8,12 +8,12 @@ use tt_domain::models::agent::profile::{
     AgentModelBinding, AgentModelBindingMode, AgentOutputArtifact, AgentOutputArtifactTarget,
     AgentOutputPolicy, AgentPresetBinding, AgentPresetBindingMode, AgentProfileDefinition,
     AgentProfileId, AgentProfileInstructions, AgentRunPolicy, AgentSkillPolicy, AgentToolPolicy,
-    AgentWorkspacePolicy, DEFAULT_AGENT_MCP_RESULT_INLINE_CHAR_LIMIT, DEFAULT_AGENT_PROFILE_ID,
-    DEFAULT_AGENT_TOOL_MAX_CALLS_PER_RUN, DEFAULT_AGENT_TOOL_MAX_ROUNDS,
+    AgentWorkspacePolicy, DEFAULT_AGENT_EXTERNAL_RESULT_INLINE_CHAR_LIMIT,
+    DEFAULT_AGENT_PROFILE_ID, DEFAULT_AGENT_TOOL_MAX_CALLS_PER_RUN, DEFAULT_AGENT_TOOL_MAX_ROUNDS,
 };
 use tt_domain::models::tool::ToolId;
 
-use super::constants::{AGENT_AWAIT_TOOL, AGENT_DELEGATE_TOOL, WORKSPACE_ROOT_UNIVERSE};
+use super::constants::{AGENT_AWAIT_TOOL, AGENT_DELEGATE_TOOL, CHAT_WORKSPACE_ROOTS};
 
 pub(super) fn default_writer_profile() -> Result<AgentProfileDefinition, ApplicationError> {
     Ok(AgentProfileDefinition {
@@ -74,7 +74,7 @@ pub(super) fn default_writer_profile() -> Result<AgentProfileDefinition, Applica
             tool_descriptions: BTreeMap::new(),
             max_rounds: DEFAULT_AGENT_TOOL_MAX_ROUNDS,
             max_calls_per_run: DEFAULT_AGENT_TOOL_MAX_CALLS_PER_RUN,
-            mcp_result_inline_char_limit: DEFAULT_AGENT_MCP_RESULT_INLINE_CHAR_LIMIT,
+            external_result_inline_char_limit: DEFAULT_AGENT_EXTERNAL_RESULT_INLINE_CHAR_LIMIT,
             max_calls_per_tool: BTreeMap::new(),
         },
         skills: AgentSkillPolicy {
@@ -82,11 +82,11 @@ pub(super) fn default_writer_profile() -> Result<AgentProfileDefinition, Applica
             deny: Vec::new(),
         },
         workspace: AgentWorkspacePolicy {
-            visible_roots: WORKSPACE_ROOT_UNIVERSE
+            visible_roots: CHAT_WORKSPACE_ROOTS
                 .iter()
                 .map(|root| root.to_string())
                 .collect(),
-            writable_roots: WORKSPACE_ROOT_UNIVERSE
+            writable_roots: CHAT_WORKSPACE_ROOTS
                 .iter()
                 .map(|root| root.to_string())
                 .collect(),
