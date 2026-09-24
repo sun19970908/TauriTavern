@@ -658,10 +658,9 @@ export function isCodeRenderDelegatedToThirdPartyRenderer() {
  */
 export async function activateRequiredChatSurfaceExtensions() {
     const enabled = getEnabledChatSurfaceRendererCapabilities();
-    // B1: 放宽互斥，允许 JSR + LWB 同时启用（LWB 已不注册 participant，不会双 participant 冲突）
-    if (enabled.length > 2) {
+    if (enabled.length > 1) {
         throw new Error(
-            'Bounded ChatSurface cannot start while more than two renderer extensions are enabled',
+            'Bounded ChatSurface cannot start while JS-Slash-Runner and LittleWhiteBox are both enabled',
         );
     }
     const requiredNames = new Set(enabled.map(capability => capability.internalName));
@@ -685,12 +684,10 @@ export async function activateRequiredChatSurfaceExtensions() {
         await callExtensionHook(name, 'chatSurface');
     }
 
-    // B1: 只返回 JSR（LWB 已不注册 participant，不应进入 requirements）
-    return Object.freeze(
-        enabled
-            .filter(({ participantId }) => participantId === 'js-slash-runner/message-runtime')
-            .map(({ extensionName, participantId }) => Object.freeze({ extensionName, participantId }))
-    );
+    return Object.freeze(enabled.map(({ extensionName, participantId }) => Object.freeze({
+        extensionName,
+        participantId,
+    })));
 }
 
 /**
