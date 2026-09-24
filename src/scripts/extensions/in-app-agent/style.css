@@ -214,7 +214,7 @@
 .ttia-composer { position: relative; z-index: 0; border: 1px solid color-mix(in srgb, var(--ttia-ink) 10%, transparent); background: var(--ttia-field); border-radius: 17px; padding: 12px 12px 9px; box-shadow: 0 1px 3px color-mix(in srgb, var(--SmartThemeShadowColor) 15%, transparent), inset 0 1px 0 color-mix(in srgb, var(--ttia-ink) 3%, transparent); transition: border-color var(--ttia-d-fast), box-shadow var(--ttia-d-fast); }
 .ttia-composer.has-status { padding-top: 0; }
 .ttia-composer:focus-within { border-color: color-mix(in srgb, var(--ttia-ink) 30%, transparent); box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--ttia-ink) 4.5%, transparent), var(--ttia-shadow-lift); }
-.ttia-root .ttia-composer textarea { background: transparent; border: 0; outline: 0; padding: 0 2px; resize: none; min-height: 2.4em; max-height: min(10em, 24vh); font-size: 1em; line-height: 1.55; border-radius: 0; display: block; transition: height 160ms var(--ttia-ease); }
+.ttia-root .ttia-composer textarea { background: transparent; border: 0; outline: 0; padding: 0 2px; resize: none; min-height: 2.4em; max-height: min(10em, 24vh); font-size: 1em; line-height: 1.55; border-radius: 0; display: block; }
 .ttia-root textarea::placeholder { color: var(--ttia-muted) !important; opacity: .8; }
 .ttia-composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
 .ttia-root .ttia-send { width: 32px; height: 32px; padding: 0; flex-shrink: 0; border-radius: 9px; background: var(--ttia-ink); color: var(--ttia-surface); font-size: 14.5px; transition: background-color var(--ttia-d-fast), color var(--ttia-d-fast), transform var(--ttia-d-fast) var(--ttia-ease), opacity var(--ttia-d-fast); }
@@ -392,6 +392,37 @@
 #advanced-formatting-button .drawer-icon[data-tt-assistant-activity="unread"]::after { content: ''; position: absolute; right: -1px; top: 0; width: 5px; height: 5px; background: var(--SmartThemeUnderlineColor); border-radius: 50%; }
 #advanced-formatting-button .drawer-icon[data-tt-assistant-activity="working"]::after { animation: ttia-breathe 1.7s ease-in-out infinite; }
 #advanced-formatting-button .drawer-icon[data-tt-assistant-activity] { position: relative; }
+
+/* The assistant cursor lives outside the drawer and never receives user input. */
+.ttia-agent-cursor {
+    position: fixed; inset: 0 auto auto 0; z-index: 2147483647;
+    width: 24px; height: 24px; min-width: 0; min-height: 0;
+    margin: 0; padding: 0; border: 0; overflow: visible;
+    background: transparent; box-shadow: none; user-select: none;
+    --ttia-cursor-accent: var(--SmartThemeUnderlineColor);
+}
+.ttia-agent-cursor, .ttia-agent-cursor * { pointer-events: none !important; }
+.ttia-agent-cursor::backdrop { background: transparent; pointer-events: none; }
+.ttia-agent-cursor::before {
+    content: ''; position: absolute; left: -12px; top: -12px; width: 40px; height: 40px;
+    border-radius: 50%;
+    background: radial-gradient(circle, color-mix(in srgb, var(--ttia-cursor-accent) 32%, transparent), transparent 70%);
+}
+.ttia-agent-cursor svg {
+    position: absolute; left: -4px; top: -4px; width: 24px; height: 24px; overflow: visible;
+    fill: var(--SmartThemeBodyColor); stroke: var(--SmartThemeBlurTintColor);
+    stroke-width: 1.8; stroke-linejoin: round;
+    filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--SmartThemeShadowColor) 50%, transparent));
+}
+.ttia-cursor-pulse {
+    position: absolute; left: -10px; top: -10px; width: 20px; height: 20px;
+    box-sizing: border-box; border-radius: 50%; opacity: 0;
+    border: 1.5px solid var(--ttia-cursor-accent);
+}
+@media (pointer: coarse), (max-width: 600px) {
+    .ttia-agent-cursor::before { left: -8px; top: -8px; width: 32px; height: 32px; }
+    .ttia-cursor-pulse { left: -8px; top: -8px; width: 16px; height: 16px; }
+}
 
 /* ---------- motion ---------- */
 @keyframes ttia-breathe { 0%, 100% { opacity: .45; transform: scale(.85); } 50% { opacity: 1; transform: scale(1); } }
