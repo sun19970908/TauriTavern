@@ -4,7 +4,7 @@
 
 ## 1. 核心契约
 
-对合法 SillyTavern JSONL，第一行是 header，后续每个非空记录都是一条消息。当前聊天加载完成后：
+聊天 JSONL 的首个非空记录是 header，后续每个非空记录都是一条消息。当前聊天加载完成后：
 
 - `chat[]` 包含 header 之后的全部消息，顺序与磁盘一致。
 - `chat[i]` 始终是 0-based 绝对消息索引。
@@ -14,6 +14,25 @@
 - 未显式切换聊天时，角色的 `chat` 文件 stem 在浅层、完整和重复读取之间保持稳定。
 
 消息集合与索引遵循 SillyTavern 1.18.0；显式开启历史滑动按需加载时，候选内容采用下述受限表示。TauriTavern 不再提供 `chat_history_mode`，也不存在前端 window state、生成时 backfill 或局部 patch 保存。
+
+### 1.1 统一格式底线
+
+- header 和消息均须为 JSON object。`chat_metadata.integrity` 可缺省，出现则须为非空字符串，保留空白并按原值比较；第一方仍生成 UUID，其他字段由使用它们的用例解释。
+- 严格解码 UTF-8，结构空白仅限空格、Tab、CR、LF。首个记录前允许空白和最多一个 BOM，由格式层统一消费；正文记录外不允许 BOM。
+- 无记录可读为空聊天；新完整提交必须自带合法 header，force 也不例外。无消息聊天写为 header-only。
+- 读取严格验证实际解释的记录，不跳过坏记录；原生完整字节提交只验证 header，不额外扫描正文。
+- TT 重新序列化写出无 BOM 的 UTF-8；原样传输、备份和复制保留字节。metadata 更新保留正文原字节，见 §3.1。
+- byte offset 以原文件计数；空白行不占逻辑记录编号。分页和 cold 消息切片不另设 header/BOM 前导区。
+
+### 1.2 目录查询投影
+
+目录信息由 storage-core 聊天仓储解释，userdata 只映射结果；各类查询保留所需的读取范围。
+
+- header 合法时，损坏的末条预览显示“Preview unavailable”，保留条目和消息记录位置。正文缺省、空正文及 header-only 不属于损坏。
+- 日期使用末条有效 `send_date`，否则使用 mtime；正文不可用不抹去有效日期。
+- 角色列表返回完整末条正文，摘要只缓存短预览。搜索发现不可用投影时不缓存整查询，即使该文件未命中。
+
+目录搜索仍匹配原始 JSONL。目录可见不保证全文可加载；I/O、编码、解压及必需 header 错误继续传播。
 
 ## 2. 完整加载与受限 DOM
 
@@ -96,6 +115,8 @@ Assistant 即使没有正文，只要包含 `tool_calls` 就是完整消息。�
 
 编辑、删除、移动、复制、隐藏与分支都只处理用户指定的物理消息，不做 owner/result 级联，也不阻止用户制造不完整工具轮。Assistant call 与 Tool result 的配对只在 provider prompt 组装边界执行；只有 provider 无法重放的 missing、orphan、duplicate、无效 ID/参数/结果关系才会带原始 `chat[index]` 明确失败。空 `tool_calls`/legacy invocation 数组视为没有工具事实，非协议必需的展示元数据不会阻断生成。
 
+SillyTavern 1.19.0 新增的工具级联删除及其参数不在 TT 支持范围内。
+
 Tool call 不进入 `swipe_info`；owner Assistant 只保留 `saveReply` 原本创建的普通单 swipe 元数据，核心 UI 不再为工具轮维护可切换状态。Tool 本身不可 swipe。若物理尾是 Tool，append/continue/swipe 的生成结果作为新的 Assistant 楼层保存，不覆盖 Tool，也不寻找所谓“逻辑 Assistant 尾”；用户可以保留、编辑或删除这次结果。
 
 calls 与全部 results 只在工具执行完成后一次性提交，避免工具 action 保存半成品 transcript。Legacy local 与 MCP tools 共用这一 writer；MCP `OutcomeUnknown` 终止当前批次且不伪造或部分提交结果。新 writer 不写 `extra.tool_invocations`；该字段仅用于读取旧 synthetic tool floors。
@@ -154,7 +175,7 @@ Rust：
 
 - DTO / service：`tt-application`。
 - repository ports：`tt-ports`。
-- JSONL 具体 I/O：`tt-adapter-storage-core`。
+- JSONL 格式与具体 I/O：`tt-adapter-storage-core`，共同格式规则位于 `chat_jsonl.rs`。
 - Tauri commands：`tauritavern` presentation 层。
 - 分页读取实现暂位于 `windowed_payload.rs` 与 `windowed_payload_io.rs`；文件名是内部历史命名，不代表前端 window mode。
 

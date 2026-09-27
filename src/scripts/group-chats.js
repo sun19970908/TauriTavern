@@ -293,13 +293,9 @@ export async function getGroupChat(groupId, reload = false, { allowNewChat = fal
         if (!isStillActive()) {
             return;
         }
-        const metadata = data?.[0]?.chat_metadata ?? {};
-        const freshChat = allowNewChat && !metadata.tainted && (!Array.isArray(data) || !data.length);
-
-        // Remove chat file header if present
-        if (Array.isArray(data) && data.length && Object.hasOwn(data[0], 'chat_metadata')) {
-            data.shift();
-        }
+        const freshChat = allowNewChat && data.length === 0;
+        // The first record is always the header, independent of its optional fields.
+        const metadata = data.shift()?.chat_metadata ?? {};
 
         // Add integrity slug if missing
         if (!metadata.integrity) {
@@ -345,7 +341,7 @@ export async function getGroupChat(groupId, reload = false, { allowNewChat = fal
                 await finalizeMessageContent(messageId, event_types.CHARACTER_MESSAGE_RENDERED, 'first_message');
             }
             await saveGroupChat(groupId, false, false, CHAT_COMMIT_REASON.MAINTENANCE);
-        } else if (Array.isArray(data) && data.length) {
+        } else {
             if (!isStillActive()) {
                 return;
             }
@@ -1971,13 +1967,14 @@ async function uploadGroupAvatar(event) {
 
     $('#dialogue_popup').addClass('large_dialogue_popup wide_dialogue_popup');
 
-    const croppedImage = await callGenericPopup('Set the crop position of the avatar image', POPUP_TYPE.CROP, '', { cropImage: result });
+    const croppedImage = power_user.never_resize_avatars ? result :
+        await callGenericPopup('Set the crop position of the avatar image', POPUP_TYPE.CROP, '', { cropImage: result });
 
     if (!croppedImage) {
         return;
     }
 
-    let thumbnail = await createThumbnail(String(croppedImage), 200, 300);
+    let thumbnail = await createThumbnail(String(croppedImage), 300, 300);
     //remove data:image/whatever;base64
     thumbnail = thumbnail.replace(/^data:image\/[a-z]+;base64,/, '');
     let _thisGroup = groups.find((x) => x.id == openGroupId);

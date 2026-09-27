@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { randomUUID } from 'node:crypto';
 import { createBrowserRuntime } from './runtime.mjs';
 
 function chatPayload(fileName) {
     return [
-        { user_name: 'User', character_name: 'Review', chat_metadata: { integrity: fileName } },
+        { user_name: 'User', character_name: 'Review', chat_metadata: { integrity: randomUUID() } },
         { name: 'User', is_user: true, is_system: false, mes: fileName, send_date: '2026-01-01T12:00:00Z', extra: {} },
     ].map(entry => JSON.stringify(entry)).join('\n');
 }
@@ -28,6 +29,7 @@ test('chat persistence and navigation', async (context) => {
     const writes = [];
     const changed = [];
     const commits = [];
+    const stateCopies = [];
     const sessions = new Map();
     let nextHandle = 1;
     let listReads = 0;
@@ -87,6 +89,7 @@ test('chat persistence and navigation', async (context) => {
             }
             case 'get_character_chat_metadata': return readHeader(args.fileName).chat_metadata;
             case 'prune_agent_chat_persistent_states': onPrune?.(args.dto); return;
+            case 'copy_agent_chat_persistent_states': stateCopies.push(args.dto); return;
             case 'commit_chat_metadata': {
                 const fileName = args.target.fileName ?? args.target.chatId;
                 if (!payloads.has(fileName)) throw { NotFound: 'Chat missing' };
@@ -267,6 +270,7 @@ test('chat persistence and navigation', async (context) => {
             }] : []);
             loads.length = writes.length = changed.length = errors.length = 0;
             commits.length = 0;
+            stateCopies.length = 0;
             fullSaveError = undefined;
             listReads = 0;
         }
@@ -288,7 +292,36 @@ test('chat persistence and navigation', async (context) => {
             assert.equal(handles.size, 0, 'Chat reads must close their file handles');
         }
 
+        await context.test('character branching preserves the source identity and assigns a new identity', async () => {
+            await reset('character');
+            const sourceIntegrity = ' legacy/chat\n ';
+            const source = payloads.get('target-chat').split('\n').map(line => JSON.parse(line));
+            source[0].chat_metadata.integrity = sourceIntegrity;
+            payloads.set('target-chat', source.map(record => JSON.stringify(record)).join('\n'));
+            await openExplicit('target-chat');
+            assert.equal(await window.__TAURITAVERN__.api.chat.current.handle().stableId(), sourceIntegrity);
+            const branchName = await getModule('scripts/bookmarks.js').namespace.createBranch(0);
+            const targetIntegrity = readHeader(branchName).chat_metadata.integrity;
+            assert.notEqual(targetIntegrity, sourceIntegrity);
+            assert.equal(stateCopies.length, 1);
+            assert.equal(stateCopies[0].sourceStableChatId, sourceIntegrity);
+            assert.equal(stateCopies[0].targetStableChatId, targetIntegrity);
+        });
+
         for (const kind of ['character', 'group']) {
+            await context.test(`${kind}: persisted empty chats and field-free headers load without a message`, async () => {
+                await reset(kind);
+                for (const text of ['', ' \n\uFEFF\n\t', '{}']) {
+                    await openExplicit('later-chat');
+                    assert.equal(main.chat.length, 1);
+                    payloads.set('target-chat', text);
+                    await openExplicit('target-chat');
+                    assert.equal(main.chat.length, 0);
+                    assert.equal(storedChat, 'target-chat');
+                    assert.deepEqual(errors, []);
+                }
+            });
+
             await context.test(`${kind}: recent opens only its target and supports a subsequent same-entity switch`, async () => {
                 await reset(kind);
                 await clickRecent();
@@ -355,7 +388,7 @@ test('chat persistence and navigation', async (context) => {
             await context.test(`${kind}: cold deletion stays synchronous, appended swipes save, and historical rollback hydrates on demand`, async () => {
                 await reset(kind);
                 const original = [
-                    { chat_metadata: { integrity: 'target-chat' } },
+                    { chat_metadata: { integrity: ' cold identity\n ' } },
                     { name:'Review', mes:'active', swipe_id:1, swipes:['older','active'], swipe_info:[{extra:{}},{extra:{}}], variables:[{score:0},{score:1}], extra:{} },
                     { name:'User', mes:'tail', is_user:true, extra:{} },
                 ];
@@ -434,6 +467,7 @@ test('chat persistence and navigation', async (context) => {
                     swipeReadGate.release.resolve();
                     const request = await pruned.promise;
                     assert.equal(request.chatRef.fileName, 'target-chat');
+                    assert.equal(request.stableChatId, original[0].chat_metadata.integrity);
                     assert.deepEqual(Array.from(request.candidateStateIds), ['cold-state']);
                     assert.equal(JSON.parse(payloads.get('target-chat').split('\n')[1]).mes, 'tail');
                     swipeReadGate = undefined;
@@ -508,7 +542,7 @@ test('chat persistence and navigation', async (context) => {
                     assert.equal(main.isChatSaving, false);
                     assert.equal(nextEntered, true);
                     assert.deepEqual(commits, [{ kind: 'full', fileName: 'target-chat', force: true, reason: 'mutation' }]);
-                    assert.equal(readHeader('target-chat').chat_metadata.integrity, 'target-chat');
+                    assert.equal(readHeader('target-chat').chat_metadata.integrity, main.chat_metadata.integrity);
                     assert.equal(JSON.parse(payloads.get('target-chat').split('\n')[1]).mes, 'local body');
                 } finally {
                     Popup.show.input = originalInput;

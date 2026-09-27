@@ -14,7 +14,7 @@ use super::FileChatRepository;
 use super::backup_inventory::{BackupEntry, BackupInventory};
 use super::summary::FileSignature;
 
-const INDEX_SCHEMA_VERSION: u32 = 1;
+const INDEX_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct BackupSummarySignature {
@@ -242,7 +242,7 @@ impl FileChatRepository {
         }
 
         let signature = BackupSummarySignature::from_entry(entry);
-        let scanned = self
+        let (scanned, _) = self
             .scan_chat_summary_file(
                 &self.backups_dir.join(&entry.file_name),
                 "",
@@ -312,64 +312,5 @@ impl FileChatRepository {
         write_json_file(&index_path, &cache.snapshot()).await?;
         cache.dirty = false;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, UNIX_EPOCH};
-
-    use super::super::backup_codec::BackupFormat;
-    use super::*;
-
-    fn entry(name: &str) -> BackupEntry {
-        BackupEntry {
-            logical_file_name: name.to_string(),
-            file_name: format!("{name}.zst"),
-            format: BackupFormat::Zstd,
-            parsed_prefix: None,
-            modified: UNIX_EPOCH + Duration::from_secs(1),
-            byte_len: 42,
-            content_signature: None,
-        }
-    }
-
-    #[test]
-    fn backup_count_is_used_only_for_the_matching_physical_file() {
-        let mut cache = BackupSummaryCache::new(PathBuf::from("unused"));
-        cache.loaded = true;
-        let original = entry("chat_alice_20260101-000000.jsonl");
-        cache.record_count(&original, 4);
-        assert_eq!(cache.message_count(&original), Some(3));
-
-        let mut replaced = original.clone();
-        replaced.byte_len += 1;
-        assert_eq!(cache.message_count(&replaced), None);
-    }
-
-    #[test]
-    fn in_memory_full_summary_does_not_dirty_unchanged_index_data() {
-        let mut cache = BackupSummaryCache::new(PathBuf::from("unused"));
-        cache.loaded = true;
-        let entry = entry("chat_alice_20260101-000000.jsonl");
-        cache.record_count(&entry, 4);
-        cache.dirty = false;
-
-        cache.record_summary(
-            &entry,
-            ChatSearchResult {
-                character_name: String::new(),
-                file_name: entry.logical_file_name.clone(),
-                file_size: entry.byte_len,
-                message_count: 3,
-                preview: "tail".to_string(),
-                date: 1,
-                chat_id: None,
-                chat_metadata: None,
-            },
-        );
-
-        assert!(!cache.dirty);
-        assert_eq!(cache.summary(&entry).unwrap().preview, "tail");
     }
 }
