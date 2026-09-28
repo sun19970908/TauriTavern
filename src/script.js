@@ -26,7 +26,7 @@ import {
     initializeChatVirtualization,
     isChatVirtualizationEnabled,
 } from './tauri/main/services/chat-surface/chat-virtualization-state.js';
-import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
+import { initDrawers, getTopLevelDrawerPanel, isTopLevelDrawerOpen, setTopLevelDrawerOpen, toggleInlineDrawer } from './scripts/drawers.js';
 import { initializeCodeMirrorEditor } from './scripts/tauri/codemirror-editor.js';
 import { getStreamingRenderInterval, normalizeStreamingFps, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
 import {
@@ -77,6 +77,8 @@ import { normalizeAgentSystemPrompt } from './scripts/tauritavern/agent/agent-sy
 import { readLegacyToolInvocations, stripOldToolTurns } from './scripts/tauritavern/tool-turn-projection.js';
 import {
     buildFrozenRunInputSnapshot,
+    updateFrozenMacroContext,
+    createMacroContextFromSnapshot,
     buildCurrentModelConnectionSnapshot,
     buildSettingsWithCurrentModelConnectionSnapshot,
     normalizeFrozenRunInputSnapshot,
@@ -167,6 +169,7 @@ import {
     importGroupChat,
     getGroupBlock,
     getGroupCharacterCardsLazy,
+    getGroupCharacterCardsSource,
     getGroupDepthPrompts,
 } from './scripts/group-chats.js';
 
@@ -205,6 +208,7 @@ import {
     getChatCompletionModel,
     isVertexAiClaudeModelId,
     createGenerationParameters,
+    createChatCompletionMacroContext,
     proxies,
     loadProxyPresets,
     selected_proxy,
@@ -355,18 +359,9 @@ import {
 } from './scripts/html-code-preview.js';
 import { getPresetManager, initPresetManager } from './scripts/preset-manager.js';
 import {
-    evaluateMacros,
     getLastMessageId,
-    getLastMessage,
-    getLastUserMessage,
-    getLastCharMessage,
-    getFirstIncludedMessageId,
-    getFirstDisplayedMessageId as getMacroFirstDisplayedMessageId,
-    getTimeSinceLastMessage,
     initMacros,
 } from './scripts/macros.js';
-import { findLastMessageId, getLastSwipeId, getCurrentSwipeId } from './scripts/macros/chat-state.js';
-import { snapshotVariableMacroValues } from './scripts/variables/values.js';
 import { currentUser, setUserControls } from './scripts/user.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup, fixToastrForDialogs } from './scripts/popup.js';
 import { renderTemplate, renderTemplateAsync } from './scripts/templates.js';
@@ -404,8 +399,9 @@ import { SimpleMutex } from './scripts/util/SimpleMutex.js';
 import { createGenerationIdleGate } from './scripts/util/generation-idle-gate.js';
 import { shouldEmitCharacterMessageEvents, shouldUnblockGenerationAfterUnhandledError } from './scripts/util/generation-lifecycle.js';
 import { AudioPlayer } from './scripts/audio-player.js';
+import { evaluateMacroEnv, captureContext as captureMacroContext } from './scripts/macros/macro-system.js';
 import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
-import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
+import { MessageFormatter } from './scripts/message-formatter.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { createStartupStatusOverlay } from './scripts/tauri/startup/startup-status-overlay.js';
@@ -812,16 +808,16 @@ registerHtmlCodePreviewParticipant({
 const chatSurface = installChatSurfaceRuntime({
     root: /** @type {HTMLElement} */ (chatElement[0]),
     getMessages: () => chat,
-    prepareMaterializeOptions: prepareMessageRegexOptions,
+    prepareMaterializeOptions: prepareMessageContent,
     formatMessageContent: (message, messageId) => getMessageTextHTML(message, { messageId }),
+    refreshMessageDetails: updateReasoningUI,
     prepareContentTransaction: prepareMesTextHtmlWithRuntimePolicy,
     emitEvent: eventSource.emit.bind(eventSource),
     materializeMessage: ({ message, messageId, frontendSourceHandoffEvent, materializeOptions }) => updateMessageElement(message, {
         messageId,
         frontendSourceHandoffEvent,
         adjustMediaScroll: materializeOptions?.adjustMediaScroll ?? SCROLL_BEHAVIOR.NONE,
-        regexSourceText: materializeOptions?.regexSourceText,
-        regexedText: materializeOptions?.regexedText,
+        messageHtml: materializeOptions?.messageHtml,
         transient: materializeOptions?.transient,
     }),
     syncMountedViewState: syncMountedChatViewState,
@@ -832,6 +828,7 @@ const chatSurface = installChatSurfaceRuntime({
 });
 
 export const finalizeMessageContent = chatSurface.finishContent;
+export const refreshChatContent = chatSurface.refreshContent;
 
 let dialogueResolve = null;
 let dialogueCloseStop = false;
@@ -1255,6 +1252,7 @@ async function firstLoadInit() {
         await checkOpenRouterAuth();
         syncMobileImmersiveFullscreenUi();
         initKeyboard();
+        initDrawers();
         initDynamicStyles();
         initTags();
         initBookmarks();
@@ -1325,7 +1323,7 @@ async function firstLoadInit() {
             }
         }
 
-        void autoloadLastChat().catch((error) => {
+        const initialChatLoad = autoloadLastChat().catch((error) => {
             console.error('Failed to auto-load the last chat:', error);
             toastr.error(t`Failed to auto-load the last chat. Check the console for details.`);
         });
@@ -1348,6 +1346,13 @@ async function firstLoadInit() {
                 await activateDeferredThirdPartyExtensions({ parallelism: 1 });
                 await eventSource.emit(event_types.EXTENSION_SETTINGS_LOADED);
                 doDailyExtensionUpdatesCheck();
+                await initialChatLoad;
+                try {
+                    await refreshChatContent();
+                } catch (error) {
+                    console.error('Failed to refresh messages after extension initialization:', error);
+                    toastr.error(t`Could not refresh message contents. Reopen the chat to try again.`);
+                }
             }
         })();
 
@@ -2480,17 +2485,6 @@ async function maybeSubmitAgentGuidanceFromComposer() {
     return true;
 }
 
-/**
- * Formats the message text into an HTML string using Markdown and other formatting.
- * @param {string} mes Message text
- * @param {string} ch_name Character name
- * @param {boolean} isSystem If the message was sent by the system
- * @param {boolean} isUser If the message was sent by the user
- * @param {number} messageId Message index in chat array
- * @param {Partial<DOMPurify.Config>} [sanitizerOverrides] DOMPurify sanitizer option overrides
- * @param {boolean} [isReasoning] If the message is reasoning output
- * @returns {string} HTML string
- */
 let nonSystemDepthByMesId = null;
 
 function rebuildNonSystemDepthByMesId() {
@@ -2521,7 +2515,7 @@ function getNonSystemDepth(messageId) {
     return depth >= 0 ? depth : undefined;
 }
 
-export function getMessageFormattingRegexContext(isUser, messageId, isReasoning = false) {
+function getMessageFormattingRegexContext(isUser, messageId, isReasoning = false) {
     const numericMessageId = Number(messageId);
     const placement = isReasoning
         ? regex_placement.REASONING
@@ -2537,114 +2531,55 @@ export function getMessageFormattingRegexContext(isUser, messageId, isReasoning 
     };
 }
 
-function normalizeMessageSystemFlag(chName, isSystem) {
-    return isSystem && chName === systemUserName;
-}
-
-function getMessageDisplayText(message) {
-    return message.extra?.display_text || message.mes;
-}
-
-function substituteFirstMessage(mes, chName, isSystem, isUser, messageId, isReasoning) {
-    if (Number(messageId) !== 0 || isSystem || isUser || isReasoning) {
-        return mes;
+// Preparation and completion stay inside the formatter; callers only receive HTML.
+function prepareMessageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false) {
+    if (!mes) return null;
+    if (Number(messageId) === 0 && !isSystem && !isUser && !isReasoning) {
+        // Display substitution must not rewrite the saved greeting or its swipe.
+        mes = substituteParams(mes, { name2Override: ch_name });
     }
-    // Rendering must not rewrite saved text or desynchronize the selected swipe.
-    return substituteParams(mes, undefined, chName);
-}
-
-function removeMessagePromptBias(mes, chName, isSystem, isUser) {
+    const sourceText = mes;
+    isSystem = isSystem && ch_name === systemUserName;
     const promptBias = power_user.user_prompt_bias && substituteParams(power_user.user_prompt_bias);
-    return !power_user.show_user_prompt_bias && chName && !isUser && !isSystem && promptBias && mes.startsWith(promptBias)
-        ? mes.slice(promptBias.length)
-        : mes;
+    if (!power_user.show_user_prompt_bias && ch_name && !isUser && !isSystem && promptBias && mes.startsWith(promptBias)) {
+        mes = mes.slice(promptBias.length);
+    }
+
+    const context = { ch_name, isSystem, isUser, messageId, isReasoning };
+    const { placement, depth } = getMessageFormattingRegexContext(isUser, messageId, isReasoning);
+    const regex = isSystem ? null : {
+        placement,
+        params: { characterOverride: ch_name, isMarkdown: true, depth },
+    };
+    if (regex) mes = MessageFormatter.runStage(MessageFormatter.stage.BEFORE_REGEX, mes, context);
+    return { sourceText, text: mes, context, regex, sanitizerOverrides };
 }
 
 /**
- * Prepares the regex output consumed by a ChatSurface materialization batch.
- * @param {{ messages: ChatMessage[]; messageIds: number[]; assertUnchanged?: boolean }} input
- * @returns {Promise<Map<number, { regexSourceText: string; regexedText: string }>>}
+ * Formats the message text into an HTML string using Markdown and other formatting.
+ * @param {string} mes Message text
+ * @param {string} ch_name Character name
+ * @param {boolean} isSystem If the message was sent by the system
+ * @param {boolean} isUser If the message was sent by the user
+ * @param {number} messageId Message index in chat array
+ * @param {Partial<DOMPurify.Config>} [sanitizerOverrides] DOMPurify sanitizer option overrides
+ * @param {boolean} [isReasoning] If the message is reasoning output
+ * @returns {string} HTML string
  */
-export async function prepareMessageRegexOptions({ messages, messageIds, assertUnchanged = true }) {
-    const requests = [];
-    const owners = [];
-
-    for (const messageId of messageIds) {
-        const message = messages[messageId];
-        if (!message) {
-            throw new Error(`Cannot prepare regex for missing message ${messageId}`);
-        }
-        if (message.role === 'tool') {
-            continue;
-        }
-
-        const isToolFloor = message.is_system === true
-            && message.is_user !== true
-            && Array.isArray(message.extra?.tool_invocations);
-        const chName = isToolFloor ? systemUserName : message.name;
-        const isSystem = normalizeMessageSystemFlag(chName, isToolFloor || message.is_system);
-        if (isSystem) {
-            continue;
-        }
-
-        const regexSourceText = substituteFirstMessage(
-            getMessageDisplayText(message),
-            chName,
-            isToolFloor || message.is_system,
-            message.is_user,
-            messageId,
-            false,
-        );
-        const { placement, depth } = getMessageFormattingRegexContext(message.is_user, messageId, false);
-        requests.push({
-            rawString: removeMessagePromptBias(regexSourceText, chName, isSystem, message.is_user),
-            placement,
-            params: { characterOverride: chName, isMarkdown: true, depth },
-        });
-        owners.push({ messageId, message, regexSourceText });
-    }
-
-    const texts = await getRegexedStringBatchAsync(requests);
-    if (assertUnchanged) {
-        for (const owner of owners) {
-            if (messages[owner.messageId] !== owner.message) {
-                throw new Error(`Message ${owner.messageId} changed while preparing regex`);
-            }
-        }
-    }
-    return new Map(owners.map((owner, index) => [owner.messageId, {
-        regexSourceText: owner.regexSourceText,
-        regexedText: texts[index],
-    }]));
+export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false) {
+    const input = prepareMessageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides, isReasoning);
+    const text = input?.regex
+        ? getRegexedString(input.text, input.regex.placement, input.regex.params)
+        : input?.text;
+    return finishMessageFormatting(input, text);
 }
 
-export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false, formattingOptions = {}) {
-    if (!mes) {
-        return '';
-    }
-
-    if (!formattingOptions?.regexPrepared) {
-        mes = substituteFirstMessage(mes, ch_name, isSystem, isUser, messageId, isReasoning);
-    }
-
-    mesForShowdownParse = formattingOptions?.regexSourceText ?? mes;
-
-    // Let comment and hidden messages have markdown.
-    isSystem = normalizeMessageSystemFlag(ch_name, isSystem);
-
-    if (!formattingOptions?.regexPrepared) {
-        mes = removeMessagePromptBias(mes, ch_name, isSystem, isUser);
-        if (!isSystem) {
-            const { placement: regexPlacement, depth } = getMessageFormattingRegexContext(isUser, messageId, isReasoning);
-
-            // Always override the character name
-            mes = getRegexedString(mes, regexPlacement, {
-                characterOverride: ch_name,
-                isMarkdown: true,
-                depth: depth,
-            });
-        }
-    }
+function finishMessageFormatting(input, mes = input?.text) {
+    if (!input) return '';
+    const { ch_name, isSystem, isUser } = input.context;
+    const { sanitizerOverrides } = input;
+    mesForShowdownParse = input.sourceText;
+    if (!isSystem) mes = MessageFormatter.runStage(MessageFormatter.stage.AFTER_REGEX, mes, input.context);
 
     if (power_user.auto_fix_generated_markdown) {
         mes = fixMarkdown(mes, true);
@@ -2722,6 +2657,8 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         mes = mes.replace(/<code(.*)>[\s\S]*?<\/code>/g, function (match) {
             return match.replace(/&amp;/g, '&');
         });
+
+        mes = MessageFormatter.runStage(MessageFormatter.stage.AFTER_MARKDOWN, mes, input.context);
     }
 
     if (!power_user.allow_name2_display && ch_name && !isUser && !isSystem) {
@@ -3339,40 +3276,59 @@ function getToolMessageHTML(message, messageId) {
     return null;
 }
 
-/**
- * Gets messageFormatting for a ChatMessage object.
- * @param {ChatMessage} message
- * @param {object} options Options
- * @param {number} [options.messageId] Message ID
- * @param {string} [options.regexSourceText] Original display text before regex
- * @param {string} [options.regexedText] Precomputed display regex output
- * @returns {string} Formatted message HTML
- */
-function getMessageTextHTML(message, { messageId = chat.indexOf(message), regexSourceText, regexedText }) {
-    // if mes.extra.uses_system_ui is true, set an override on the sanitizer options
-    /** @type {Partial<DOMPurify.Config>} */
-    const sanitizerOverrides = message.extra?.uses_system_ui ? { MESSAGE_ALLOW_SYSTEM_UI: true } : {};
+/** The message owns its display source and sanitizer policy in both execution modes. */
+function getMessageFormattingArgs(message, messageId) {
     const isToolFloor = message.is_system === true
         && message.is_user !== true
         && Array.isArray(message.extra?.tool_invocations);
-    const invocations = isToolFloor
-        ? readLegacyToolInvocations(message, messageId).invocations
-        : null;
+    const text = isToolFloor
+        ? ToolManager.formatToolInvocationMessage(readLegacyToolInvocations(message, messageId).invocations)
+        : (message.extra?.display_text || message.mes);
+    return [
+        text,
+        isToolFloor ? systemUserName : message.name,
+        isToolFloor || message.is_system,
+        message.is_user,
+        messageId,
+        message.extra?.uses_system_ui ? { MESSAGE_ALLOW_SYSTEM_UI: true } : {},
+    ];
+}
 
-    const hasRegexedText = regexedText !== undefined;
+/** @param {ChatMessage} message @param {{ messageId?: number }} options */
+function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
     return getToolMessageHTML(message, messageId)
-        ?? messageFormatting(
-            hasRegexedText
-                ? regexedText
-                : (invocations ? ToolManager.formatToolInvocationMessage(invocations) : getMessageDisplayText(message)),
-            isToolFloor ? systemUserName : message.name,
-            isToolFloor || message.is_system,
-            message.is_user,
-            messageId,
-            sanitizerOverrides,
-            false,
-            { regexPrepared: hasRegexedText, regexSourceText },
-        );
+        ?? messageFormatting(...getMessageFormattingArgs(message, messageId));
+}
+
+/**
+ * Batch formatting uses the same preparation and completion as messageFormatting.
+ * Only regex execution is asynchronous; no partial formatting state escapes.
+ * @param {{ messages: ChatMessage[]; messageIds: number[] }} input
+ * @returns {Promise<Map<number, { messageHtml: string }>>}
+ */
+async function prepareMessageContent({ messages, messageIds }) {
+    const entries = messageIds.map(messageId => {
+        const message = messages[messageId];
+        const html = getToolMessageHTML(message, messageId);
+        const input = html === null ? prepareMessageFormatting(...getMessageFormattingArgs(message, messageId)) : null;
+        return { messageId, html, input };
+    });
+    const requests = entries.filter(entry => entry.input?.regex)
+        .map(({ input }) => ({ rawString: input.text, ...input.regex }));
+    const texts = await getRegexedStringBatchAsync(requests);
+    const results = new Map();
+    let regexIndex = 0;
+    let start = performance.now();
+    for (const { messageId, html, input } of entries) {
+        results.set(messageId, {
+            messageHtml: html ?? finishMessageFormatting(input, input?.regex ? texts[regexIndex++] : input?.text),
+        });
+        if (performance.now() - start > 8) {
+            await delay(0);
+            start = performance.now();
+        }
+    }
+    return results;
 }
 
 /** @type {WeakMap<ChatMessage, Array<ChatToolCall & { result?: string, error?: boolean }>>} */
@@ -3515,12 +3471,11 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
  * @param {JQuery<HTMLElement>} [options.messageElement=messageTemplate.clone()] This message element will be updated with the ChatMessage object.
  * @param {SCROLL_BEHAVIOR} [options.adjustMediaScroll=SCROLL_BEHAVIOR.NONE] Scroll behavior option passed to appendMediaToMessage.
  * @param {string|null} [options.frontendSourceHandoffEvent=null] Event after which detached frontend source cover is released.
- * @param {string} [options.regexSourceText] Original display text before regex.
- * @param {string} [options.regexedText] Precomputed display regex output.
+ * @param {string} [options.messageHtml] Fully formatted message body.
  * @param {boolean} [options.transient=false] Whether to defer content processors and runtimes.
  * @returns {JQuery<HTMLElement>} Rendered HTMLElement.
  */
-export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, frontendSourceHandoffEvent = null, regexSourceText, regexedText, transient = false } = {}) {
+export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, frontendSourceHandoffEvent = null, messageHtml, transient = false } = {}) {
     let avatarImg = getThumbnailUrl('persona', user_avatar);
 
     //for non-user messages
@@ -3544,7 +3499,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     }
     const momentDate = timestampToMoment(mes.send_date);
     const timestamp = momentDate.isValid() ? momentDate.format('LL LT') : '';
-    const messageHTML = getMessageTextHTML(mes, { messageId, regexSourceText, regexedText });
+    const messageHTML = messageHtml ?? getMessageTextHTML(mes, { messageId });
     const bookmarkLink = mes?.extra?.bookmark_link;
     const tokenCount = mes.extra?.token_count;
     const { timerValue, timerTitle, tokenRate } = formatGenerationTimer(mes.gen_started, mes.gen_finished, mes.extra?.token_count, mes.extra?.reasoning_duration, mes.extra?.time_to_first_token);
@@ -3700,23 +3655,13 @@ export function substituteParamsExtended(content, additionalMacro = {}, postProc
  * @returns {string} The string with substituted parameters.
  */
 export function substituteParamsLegacy(content, _name1, _name2, _original, _group, _replaceCharacterCard = true, additionalMacro = {}, postProcessFn = (x) => x) {
-    if (!content) {
-        return '';
-    }
+    return substituteParams(content, {
+        name1Override: _name1, name2Override: _name2, original: _original, groupOverride: _group,
+        replaceCharacterCard: _replaceCharacterCard, dynamicMacros: additionalMacro, postProcessFn,
+    });
+}
 
-    // If experimental macro engine is enabled, use it. This code will be cleaned up in the future.
-    if (power_user?.experimental_macro_engine) {
-        return substituteParams(content, {
-            name1Override: _name1,
-            name2Override: _name2,
-            original: _original,
-            groupOverride: _group,
-            replaceCharacterCard: _replaceCharacterCard ?? true,
-            dynamicMacros: additionalMacro ?? {},
-            postProcessFn: postProcessFn ?? ((x) => x),
-        });
-    }
-
+function suggestExperimentalMacroEngine(content) {
     // Try to roughly detect experimental macro features to show the onboarding if needed.
     // This does not have to be 100% accurate, only best effort what we can quickly check.
     // Only do this if the warning wasn't shown yet, to prevent needless regex checks.
@@ -3732,103 +3677,6 @@ export function substituteParamsLegacy(content, _name1, _name2, _original, _grou
         if (feature) void onboardingExperimentalMacroEngine(feature);
     }
 
-    const environment = {};
-
-    if (typeof _original === 'string') {
-        let originalSubstituted = false;
-        environment.original = () => {
-            if (originalSubstituted) {
-                return '';
-            }
-
-            originalSubstituted = true;
-            return _original;
-        };
-    }
-
-    const getGroupValue = (includeMuted) => {
-        if (typeof _group === 'string') {
-            return _group;
-        }
-
-        if (selected_group) {
-            const members = groups.find(x => x.id === selected_group)?.members;
-            /** @type {string[]} */
-            const disabledMembers = groups.find(x => x.id === selected_group)?.disabled_members ?? [];
-            const isMuted = x => includeMuted ? true : !disabledMembers.includes(x);
-            const names = Array.isArray(members)
-                ? members.filter(isMuted).map(m => characters.find(c => c.avatar === m)?.name).filter(Boolean).join(', ')
-                : '';
-            return names;
-        } else {
-            return _name2 ?? name2;
-        }
-    };
-
-    const getNotCharValue = () => {
-        const currentUser = _name1 ?? name1;
-        const currentSpeaker = _name2 ?? name2;
-
-        // Single character chat
-        if (!selected_group) {
-            return currentUser;
-        }
-
-        // Group chat
-        const members = groups.find(x => x.id === selected_group)?.members;
-
-        if (!Array.isArray(members)) {
-            return currentUser;
-        }
-
-        const memberNames = members
-            .map(m => characters.find(c => c.avatar === m)?.name)
-            .filter(Boolean); // Filter out any null/undefined names
-
-        // Filter out the current speaker and add the user
-        const otherMembers = memberNames.filter(name => name !== currentSpeaker);
-        otherMembers.push(currentUser);
-
-        return otherMembers.join(', ');
-    };
-
-    if (_replaceCharacterCard) {
-        const fields = getCharacterCardFields();
-        environment.charPrompt = fields.system || '';
-        environment.charInstruction = environment.charJailbreak = fields.jailbreak || '';
-        environment.description = fields.description || '';
-        environment.personality = fields.personality || '';
-        environment.scenario = fields.scenario || '';
-        environment.persona = fields.persona || '';
-        environment.mesExamples = () => {
-            const isInstruct = power_user.instruct.enabled && main_api !== 'openai';
-            const mesExamplesArray = parseMesExamples(fields.mesExamples, isInstruct);
-            if (isInstruct) {
-                const instructExamples = formatInstructModeExamples(mesExamplesArray, name1, name2);
-                return instructExamples.join('');
-            }
-            return mesExamplesArray.join('');
-        };
-        environment.mesExamplesRaw = fields.mesExamples || '';
-        environment.charVersion = fields.version || '';
-        environment.char_version = fields.version || '';
-        environment.charDepthPrompt = fields.charDepthPrompt || '';
-        environment.creatorNotes = fields.creatorNotes || '';
-    }
-
-    // Must be substituted last so that they're replaced inside {{description}}
-    environment.user = _name1 ?? name1;
-    environment.char = _name2 ?? name2;
-    environment.group = environment.charIfNotGroup = getGroupValue(true);
-    environment.groupNotMuted = getGroupValue(false);
-    environment.notChar = getNotCharValue();
-    environment.model = getGeneratingModel();
-
-    if (additionalMacro && typeof additionalMacro === 'object') {
-        Object.assign(environment, additionalMacro);
-    }
-
-    return evaluateMacros(content, environment, postProcessFn);
 }
 
 /** @typedef {import('./scripts/macros/engine/MacroRegistry.js').MacroHandler} MacroHandler */
@@ -3851,38 +3699,20 @@ export function substituteParamsLegacy(content, _name1, _name2, _original, _grou
  */
 export function substituteParams(content, options = {}) {
     if (!content) return '';
-
     if (typeof content !== 'string') {
         console.warn('substituteParams: content will be coerced to string', content);
         content = String(content);
     }
-
-    // Handle legacy signature calls to substituteParams
-    // We'll simply re-route them to a temporary legacy function. In the future, we'll remove this and cleanly build the options object ourselves.
     const isOptionsObject = options && typeof options === 'object' && !Array.isArray(options);
-    if (!isOptionsObject) {
+    // An omitted user override is still a positional call when later arguments exist.
+    if (!isOptionsObject || (arguments.length > 2 && arguments[1] === undefined)) {
         return substituteParamsLegacy.call(this, ...arguments);
     }
-
-    // Keep the new macro engine behind a feature switch for now
-    if (!power_user?.experimental_macro_engine) {
-        return substituteParamsLegacy(content, options.name1Override, options.name2Override, options.original, options.groupOverride, options.replaceCharacterCard, options.dynamicMacros, options.postProcessFn);
-    }
-
-    const ctx = /** @type {import('./scripts/macros/engine/MacroEnvBuilder.js').MacroEnvRawContext} */ ({
-        content,
-        name1Override: options.name1Override,
-        name2Override: options.name2Override,
-        original: options.original,
-        groupOverride: options.groupOverride,
-        replaceCharacterCard: options.replaceCharacterCard ?? true,
-        dynamicMacros: options.dynamicMacros ?? {},
-        postProcessFn: options.postProcessFn ?? ((x) => x),
-    });
-
-    const env = MacroEnvBuilder.buildFromRawEnv(ctx);
-    const result = MacroEngine.evaluate(content, env);
-    return result;
+    const env = MacroEnvBuilder.buildFromRawEnv({
+        ...options, content, replaceCharacterCard: options.replaceCharacterCard ?? true,
+    }, power_user.experimental_macro_engine ? 'new' : 'legacy');
+    if (env.engine === 'legacy') suggestExperimentalMacroEngine(content);
+    return evaluateMacroEnv(content, env);
 }
 
 
@@ -4264,78 +4094,50 @@ export function createLazyFields(resolvers) {
 }
 
 /**
- * Returns the character card fields for the current character as lazy getters.
- * Each field is only processed (baseChatReplace) when first accessed.
+ * Select raw character inputs without expanding their macros.
  * @param {Object} [options={}]
  * @param {number} [options.chid] Optional character index
- * @returns {CharacterCardFields} Character card fields with lazy evaluation
  */
-export function getCharacterCardFieldsLazy({ chid = undefined } = {}) {
+export function getCharacterCardFieldsSource({ chid = undefined } = {}) {
     const currentChid = chid ?? this_chid;
     const character = characters[currentChid];
-
-    // For group chats, we need to check if group cards should be used
-    const useGroupCards = selected_group && character;
-    const groupCardsLazy = useGroupCards ? getGroupCharacterCardsLazy(selected_group, Number(currentChid)) : null;
-
-    /** @type {Record<string, () => string|string[]>} */
-    const resolvers = {
-        persona: () => baseChatReplace(power_user.persona_description?.trim()),
-        system: () => {
-            if (!character) return '';
-            const systemPrompt = chat_metadata.system_prompt || character.data?.system_prompt || '';
-            return power_user.prefer_character_prompt ? baseChatReplace(systemPrompt.trim()) : '';
-        },
-        jailbreak: () => {
-            if (!character) return '';
-            return power_user.prefer_character_jailbreak ? baseChatReplace(character.data?.post_history_instructions?.trim()) : '';
-        },
-        version: () => character?.data?.character_version ?? '',
-        charDepthPrompt: () => {
-            if (!character) return '';
-            return baseChatReplace(character.data?.extensions?.depth_prompt?.prompt?.trim());
-        },
-        creatorNotes: () => {
-            if (!character) return '';
-            return baseChatReplace(character.data?.creator_notes?.trim());
-        },
-        // These four fields may be overridden by group cards
-        description: () => {
-            if (groupCardsLazy) return groupCardsLazy.description;
-            if (!character) return '';
-            return baseChatReplace(character.description?.trim());
-        },
-        personality: () => {
-            if (groupCardsLazy) return groupCardsLazy.personality;
-            if (!character) return '';
-            return baseChatReplace(character.personality?.trim());
-        },
-        scenario: () => {
-            if (groupCardsLazy) return groupCardsLazy.scenario;
-            if (!character) return '';
-            const scenarioText = chat_metadata.scenario || character.scenario || '';
-            return baseChatReplace(scenarioText.trim());
-        },
-        mesExamples: () => {
-            if (groupCardsLazy) return groupCardsLazy.mesExamples;
-            if (!character) return '';
-            const exampleDialog = chat_metadata.mes_example || character.mes_example || '';
-            return baseChatReplace(exampleDialog.trim());
-        },
-        firstMessage: () => {
-            if (!character) return '';
-            const firstMes = character.first_mes?.trim() || '';
-            return baseChatReplace(firstMes);
-        },
-        alternateGreetings: () => {
-            if (!character) return [];
-            const altGreetings = character.data?.alternate_greetings;
-            if (!Array.isArray(altGreetings)) return [];
-            return altGreetings.map(greeting => baseChatReplace(greeting?.trim()));
-        },
+    return {
+        persona: power_user.persona_description?.trim() ?? '',
+        system: character && power_user.prefer_character_prompt
+            ? (chat_metadata.system_prompt || character.data?.system_prompt || '').trim() : '',
+        jailbreak: character && power_user.prefer_character_jailbreak
+            ? character.data?.post_history_instructions?.trim() ?? '' : '',
+        version: character?.data?.character_version ?? '',
+        charDepthPrompt: character?.data?.extensions?.depth_prompt?.prompt?.trim() ?? '',
+        creatorNotes: character?.data?.creator_notes?.trim() ?? '',
+        description: character?.description?.trim() ?? '',
+        personality: character?.personality?.trim() ?? '',
+        scenario: character ? (chat_metadata.scenario || character.scenario || '').trim() : '',
+        mesExamples: character ? (chat_metadata.mes_example || character.mes_example || '').trim() : '',
+        firstMessage: character?.first_mes?.trim() ?? '',
+        alternateGreetings: Array.isArray(character?.data?.alternate_greetings)
+            ? character.data.alternate_greetings.map(value => value?.trim() ?? '') : [],
+        groupCards: selected_group && character ? getGroupCharacterCardsSource(selected_group, Number(currentChid)) : null,
     };
+}
 
+/** Interpret selected card inputs lazily, using the caller's text evaluator. */
+export function createCharacterCardFields(source, replace = baseChatReplace) {
+    const groupCards = getGroupCharacterCardsLazy(null, null, { source: source.groupCards, replace });
+    const resolvers = {};
+    for (const key of ['system', 'jailbreak', 'persona', 'charDepthPrompt', 'creatorNotes', 'firstMessage']) {
+        resolvers[key] = () => replace(source[key]);
+    }
+    for (const key of ['description', 'personality', 'scenario', 'mesExamples']) {
+        resolvers[key] = () => groupCards ? groupCards[key] : replace(source[key]);
+    }
+    resolvers.version = () => source.version;
+    resolvers.alternateGreetings = () => source.alternateGreetings.map(value => replace(value));
     return createLazyFields(resolvers);
+}
+
+export function getCharacterCardFieldsLazy({ chid = undefined } = {}) {
+    return createCharacterCardFields(getCharacterCardFieldsSource({ chid }));
 }
 
 /**
@@ -4364,117 +4166,45 @@ export function getCharacterCardFields({ chid = undefined } = {}) {
     };
 }
 
-function buildAgentPromptMacroContext(promptInputs = {}) {
-    const fields = getCharacterCardFields();
-    const charName = String(promptInputs.name2 ?? name2 ?? '');
-    const userName = String(name1 ?? '');
-    const mesExamplesRaw = String(fields.mesExamples ?? '');
-    const now = moment();
-
+/** Project already evaluated character fields and captured facts for native read-only substitution. */
+function buildAgentReadOnlyMacros(context, fields, examples) {
+    const now = moment(context.now);
     return {
-        schemaVersion: 1,
-        names: {
-            user: userName,
-            char: charName,
-            group: getAgentPromptMacroGroupValue({ currentChar: charName, includeMuted: true }),
-            groupNotMuted: getAgentPromptMacroGroupValue({ currentChar: charName, includeMuted: false }),
-            notChar: getAgentPromptMacroGroupValue({
-                currentChar: charName,
-                filterOutChar: true,
-                includeUser: userName,
-            }),
-        },
-        character: {
-            charPrompt: String(fields.system || promptInputs.systemPromptOverride || ''),
-            charInstruction: String(fields.jailbreak || promptInputs.jailbreakPromptOverride || ''),
-            charJailbreak: String(fields.jailbreak || promptInputs.jailbreakPromptOverride || ''),
-            description: String(promptInputs.charDescription ?? fields.description ?? ''),
-            personality: String(promptInputs.charPersonality ?? fields.personality ?? ''),
-            scenario: String(promptInputs.scenario ?? fields.scenario ?? ''),
-            persona: String(fields.persona ?? ''),
-            personaPosition: Number(power_user.persona_description_position),
-            mesExamplesRaw,
-            mesExamples: parseMesExamples(mesExamplesRaw, false).join(''),
-            charDepthPrompt: String(fields.charDepthPrompt ?? ''),
-            creatorNotes: String(fields.creatorNotes ?? ''),
-            version: String(fields.version ?? ''),
-            firstMessage: String(fields.firstMessage ?? ''),
-            alternateGreetings: Array.isArray(fields.alternateGreetings)
-                ? fields.alternateGreetings.map(value => String(value ?? ''))
-                : [],
-        },
-        system: {
-            model: String(getGeneratingModel() ?? ''),
-        },
-        chat: {
-            lastMessageId: String(findLastMessageId(chat) ?? ''),
-            lastSwipeId: String(getLastSwipeId(chat) ?? ''),
-            currentSwipeId: String(getCurrentSwipeId(chat) ?? ''),
+        characterValues: {
+            charPrompt: fields.system,
+            charInstruction: fields.jailbreak,
+            description: fields.description,
+            personality: fields.personality,
+            scenario: fields.scenario,
+            persona: fields.persona,
+            personaPosition: context.character.personaPosition,
+            mesExamplesRaw: fields.mesExamples,
+            mesExamples: examples,
+            charDepthPrompt: fields.charDepthPrompt,
+            creatorNotes: fields.creatorNotes,
+            version: fields.version,
+            firstMessage: fields.firstMessage,
+            alternateGreetings: fields.alternateGreetings,
         },
         builtins: {
-            ...getInstructMacroValues({ charPrompt: fields.system }),
+            ...getInstructMacroValues({ charPrompt: fields.system }, context.settings),
             time: now.format('LT'),
             date: now.format('LL'),
             weekday: now.format('dddd'),
             isotime: now.format('HH:mm'),
             isodate: now.format('YYYY-MM-DD'),
-            idleDuration: getTimeSinceLastMessage(now),
-            lastMessage: getLastMessage(),
-            lastUserMessage: getLastUserMessage(),
-            lastCharMessage: getLastCharMessage(),
-            firstIncludedMessageId: String(getFirstIncludedMessageId() ?? ''),
-            firstDisplayedMessageId: String(getMacroFirstDisplayedMessageId() ?? ''),
-            allChatRange: chat.length ? `0-${chat.length - 1}` : '',
-            input: String($('#send_textarea').val() ?? ''),
-            isMobile: String(isMobile()),
-            lastGenerationType: String(promptInputs.type || 'normal'),
-            maxPrompt: String(getMaxPromptTokens()),
-            maxContext: String(getMaxContextTokens()),
-            maxResponse: String(getMaxResponseTokens()),
-            reasoningPrefix: String(power_user.reasoning.prefix ?? ''),
-            reasoningSuffix: String(power_user.reasoning.suffix ?? ''),
-            reasoningSeparator: String(power_user.reasoning.separator ?? ''),
+            ...Object.fromEntries(['idleDuration', 'lastMessage', 'lastUserMessage', 'lastCharMessage',
+                'firstIncludedMessageId', 'firstDisplayedMessageId', 'allChatRange']
+                .map(key => [key, String(context.chat[key] ?? '')])),
+            ...Object.fromEntries(['input', 'isMobile', 'lastGenerationType']
+                .map(key => [key, String(context.state[key])])),
+            ...Object.fromEntries(['maxPrompt', 'maxContext', 'maxResponse']
+                .map(key => [key, String(context.system[key])])),
+            reasoningPrefix: context.settings.reasoning.prefix ?? '',
+            reasoningSuffix: context.settings.reasoning.suffix ?? '',
+            reasoningSeparator: context.settings.reasoning.separator ?? '',
         },
     };
-}
-
-/**
- * 采集 SillyTavern 变量快照（只读），供 skill 脚本沙箱 `context.variables` 使用。
- * local 对应 chat_metadata.variables（per-chat），global 对应
- * extension_settings.variables.global（跨 chat）。值保持原始存储格式。
- * @returns {{ local: Record<string, any>, global: Record<string, any> }}
- */
-function buildAgentVariablesSnapshot() {
-    return {
-        local: { ...(chat_metadata?.variables ?? {}) },
-        global: { ...(extension_settings?.variables?.global ?? {}) },
-    };
-}
-
-function getAgentPromptMacroGroupValue({
-    currentChar = '',
-    includeMuted = false,
-    filterOutChar = false,
-    includeUser = null,
-} = {}) {
-    if (!selected_group) {
-        return filterOutChar ? String(includeUser ?? '') : String(currentChar ?? '');
-    }
-
-    const group = groups.find(x => x && x.id === selected_group);
-    const members = Array.isArray(group?.members) ? group.members : [];
-    const disabledMembers = Array.isArray(group?.disabled_members) ? group.disabled_members : [];
-    const names = members
-        .filter(id => includeMuted || !disabledMembers.includes(id))
-        .map(id => characters.find(character => character && character.avatar === id)?.name)
-        .filter(name => typeof name === 'string' && name)
-        .filter(name => !filterOutChar || name !== currentChar);
-
-    if (includeUser) {
-        names.push(String(includeUser));
-    }
-
-    return names.join(', ');
 }
 
 /**
@@ -4482,7 +4212,7 @@ function getAgentPromptMacroGroupValue({
  * @param {string} examplesStr
  * @returns {string[]} Examples array with block heading
  */
-export function parseMesExamples(examplesStr, isInstruct) {
+export function parseMesExamples(examplesStr, isInstruct, { settings = power_user, api = main_api, substitute = substituteParams } = {}) {
     if (!examplesStr || examplesStr.length === 0 || examplesStr === '<START>') {
         return [];
     }
@@ -4491,8 +4221,8 @@ export function parseMesExamples(examplesStr, isInstruct) {
         examplesStr = '<START>\n' + examplesStr.trim();
     }
 
-    const exampleSeparator = power_user.context.example_separator ? `${substituteParams(power_user.context.example_separator)}\n` : '';
-    const blockHeading = (main_api === 'openai' || isInstruct) ? '<START>\n' : exampleSeparator;
+    const exampleSeparator = settings.context.example_separator ? `${substitute(settings.context.example_separator)}\n` : '';
+    const blockHeading = (api === 'openai' || isInstruct) ? '<START>\n' : exampleSeparator;
     const splitExamples = examplesStr.split(/<START>/gi).slice(1).map(block => `${blockHeading}${block.trim()}\n`);
 
     return splitExamples;
@@ -5618,6 +5348,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         await sendMessageAsUserAtProviderBarrier(oai_settings.send_if_empty.trim(), messageBias);
     }
 
+    const characterFields = getCharacterCardFields();
     let {
         description,
         personality,
@@ -5628,7 +5359,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         jailbreak,
         charDepthPrompt,
         creatorNotes,
-    } = getCharacterCardFields();
+    } = characterFields;
 
     // Depth prompt (character-specific A/N)
     removeDepthPrompts();
@@ -5799,6 +5530,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     }
 
     let mesExamplesArray = parseMesExamples(mesExamples, isInstruct);
+    const characterExamples = mesExamplesArray.join('');
 
     // Set non-WI AN
     setFloatingPrompt();
@@ -6443,6 +6175,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     let thisPromptBits = [];
 
     let generate_data;
+    let agentPromptInputs;
     let toolData;
     switch (main_api) {
         case 'koboldhorde':
@@ -6511,28 +6244,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             }, dryRun);
             toolData = evaluatedToolData;
             generate_data = { prompt: prompt };
-            if (agentMode) {
-                const currentModelConnection = await buildCurrentModelConnectionSnapshot({
-                    settings: oai_settings,
-                    model: getChatCompletionModel(oai_settings),
-                    secretKey: resolveSecretKey(),
-                    secretState: secret_state,
-                });
-                const macroContext = buildAgentPromptMacroContext(promptInputs);
-                const variables = buildAgentVariablesSnapshot();
-                generate_data.frozenRunInputSnapshot = buildFrozenRunInputSnapshot({
-                    generationType: type,
-                    promptInputs,
-                    worldInfoActivation,
-                    macroContext: {
-                        ...macroContext,
-                        variableValues: snapshotVariableMacroValues(variables,
-                            power_user.experimental_macro_engine ? value => MacroEngine.normalizeMacroResult(value) : String),
-                    },
-                    variables,
-                    currentModelConnection,
-                });
-            }
+            if (agentMode) agentPromptInputs = promptInputs;
 
             // TODO: move these side-effects somewhere else, so this switch-case solely sets generate_data
             // counts will return false if the user has not enabled the token breakdown feature
@@ -6548,6 +6260,25 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     }
 
     await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun);
+
+    // Extensions finish their prompt work before the Run takes ownership of its inputs.
+    // This also runs for SDK dry-runs, whose listener retains generate_data until Generate returns.
+    if (agentMode) {
+        const context = captureMacroContext();
+        context.state.lastGenerationType = type || 'normal';
+        const currentModelConnection = await buildCurrentModelConnectionSnapshot({
+            settings: oai_settings,
+            model: getChatCompletionModel(oai_settings),
+            secretKey: resolveSecretKey(),
+            secretState: secret_state,
+        });
+        generate_data.frozenRunInputSnapshot = buildFrozenRunInputSnapshot(updateFrozenMacroContext({
+            generationType: type,
+            promptInputs: agentPromptInputs,
+            worldInfoActivation,
+            currentModelConnection,
+        }, context, buildAgentReadOnlyMacros(context, characterFields, characterExamples)));
+    }
 
     if (dryRun) {
         return Promise.resolve();
@@ -6935,7 +6666,11 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
             model,
             type,
             structuredClone(messages),
-            { jsonSchema, agentMode: true },
+            {
+                jsonSchema, agentMode: true,
+                macroContext: createChatCompletionMacroContext(
+                    createMacroContextFromSnapshot(frozenRunInputSnapshot), settings, model),
+            },
         );
 
         assertAgentPromptSnapshotHasNoExternalTools(chatCompletionPayload);
@@ -13312,8 +13047,8 @@ function doDrawerOpenClick() {
     const targetDrawerID = $(this).attr('data-target');
     const drawer = $(`#${targetDrawerID}`);
     const drawerToggle = drawer.find('.drawer-toggle');
-    const drawerWasOpenAlready = drawerToggle.parent().find('.drawer-content').hasClass('openDrawer');
-    if (drawerWasOpenAlready || drawer.hasClass('resizing')) { return; }
+    const panel = getTopLevelDrawerPanel(drawerToggle.get(0));
+    if (!panel || isTopLevelDrawerOpen(panel) || drawer.hasClass('resizing')) { return; }
     doNavbarIconClick.call(drawerToggle);
 }
 
@@ -13323,41 +13058,32 @@ function doDrawerOpenClick() {
  * @returns {Promise<void>}
  */
 export async function doNavbarIconClick() {
-    const icon = $(this).find('.drawer-icon');
-    const drawer = $(this).parent().find('.drawer-content');
-    const drawerWasOpenAlready = $(this).parent().find('.drawer-content').hasClass('openDrawer');
-    const targetDrawerID = $(this).parent().find('.drawer-content').attr('id');
+    const panel = getTopLevelDrawerPanel($(this).get(0));
+    if (!panel) return;
+    const drawerWasOpenAlready = isTopLevelDrawerOpen(panel);
 
     if (!drawerWasOpenAlready) {
-        const $openDrawers = $('.openDrawer:not(.pinnedOpen)');
-        const $openIcons = $('.openIcon:not(.drawerPinnedOpen)');
-        for (const iconEl of $openIcons) {
-            $(iconEl).toggleClass('closedIcon openIcon');
-        }
-        for (const el of $openDrawers) {
-            $(el).toggleClass('closedDrawer openDrawer');
-        }
-        if ($openDrawers.length && animation_duration) {
+        const openDrawers = document.querySelectorAll('.drawer-content.openDrawer:not(.pinnedOpen)');
+        for (const openPanel of openDrawers) setTopLevelDrawerOpen(openPanel, false);
+        if (openDrawers.length && animation_duration) {
             await delay(animation_duration);
         }
-        icon.toggleClass('openIcon closedIcon');
-        drawer.toggleClass('openDrawer closedDrawer');
+        setTopLevelDrawerOpen(panel, true);
 
-        if (targetDrawerID === 'right-nav-panel') {
+        if (panel.id === 'right-nav-panel') {
             favsToHotswap();
             $('#rm_print_characters_block').trigger('scroll');
         }
 
         // Set the height of "autoSetHeight" textareas within the drawer to their scroll height
         if (!CSS.supports('field-sizing', 'content')) {
-            const textareas = $(this).closest('.drawer').find('.drawer-content textarea.autoSetHeight');
+            const textareas = panel.querySelectorAll('textarea.autoSetHeight');
             for (const textarea of textareas) {
                 await resetScrollHeight($(textarea));
             }
         }
-    } else if (drawerWasOpenAlready) {
-        icon.toggleClass('closedIcon openIcon');
-        drawer.toggleClass('closedDrawer openDrawer');
+    } else {
+        setTopLevelDrawerOpen(panel, false);
     }
 }
 
@@ -14571,11 +14297,10 @@ jQuery(async function () {
         // This autocloses open drawers that are not pinned if a click happens inside the app which does not target them.
         const targetParentHasOpenDrawer = clickTarget.parents('.openDrawer').length;
         if (!clickTarget.hasClass('drawer-icon') && !clickTarget.hasClass('openDrawer')) {
-            const $openDrawers = $('.openDrawer').not('.pinnedOpen');
-            if ($openDrawers.length && targetParentHasOpenDrawer === 0) {
-                // Toggle icon and drawer classes
-                $('.openIcon').not('.drawerPinnedOpen').toggleClass('closedIcon openIcon');
-                $openDrawers.toggleClass('closedDrawer openDrawer');
+            if (targetParentHasOpenDrawer === 0) {
+                for (const panel of document.querySelectorAll('.drawer-content.openDrawer:not(.pinnedOpen)')) {
+                    setTopLevelDrawerOpen(panel, false);
+                }
             }
         }
     });
@@ -14590,7 +14315,6 @@ jQuery(async function () {
             console.debug('inline-drawer-toggle: .inline-drawer ancestor not found', this);
             return;
         }
-        const icon = drawer.find('>.inline-drawer-header .inline-drawer-icon');
         const drawerContent = drawer.find('>.inline-drawer-content');
         const drawerContentEl = drawerContent.get(0);
         if (!drawerContentEl || drawerContentEl.nodeType !== 1) {
@@ -14598,16 +14322,7 @@ jQuery(async function () {
             return;
         }
 
-        const open = !isInlineDrawerContentOpen(drawerContentEl);
-        icon.toggleClass('down', !open);
-        icon.toggleClass('up', open);
-        icon.toggleClass('fa-circle-chevron-down', !open);
-        icon.toggleClass('fa-circle-chevron-up', open);
-        drawerEl.dispatchEvent(new CustomEvent('inline-drawer-toggle', { bubbles: true, detail: { open } }));
-        const motion = setInlineDrawerContentOpen(drawerContentEl, open, { durationMs: animation_duration });
-        void motion.then(() => {
-            drawerEl.dispatchEvent(new CustomEvent('inline-drawer-motion-complete', { bubbles: true, detail: { open } }));
-        });
+        const open = toggleInlineDrawer(drawerEl, animation_duration);
 
         // Set the height of "autoSetHeight" textareas within the inline-drawer to their scroll height
         if (open && !CSS.supports('field-sizing', 'content')) {
