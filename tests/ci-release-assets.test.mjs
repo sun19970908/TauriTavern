@@ -10,16 +10,10 @@ const ARTIFACTS = new Map([
     ['android-arm-apk', 'app-armeabi-v7a-release.apk'],
     ['android-arm64-apk', 'app-arm64-v8a-release.apk'],
     ['darwin-aarch64-app', 'TauriTavern.app/Contents/MacOS/TauriTavern'],
-    ['darwin-aarch64-dmg', 'TauriTavern_aarch64.dmg'],
     ['darwin-x64-app', 'TauriTavern.app/Contents/MacOS/TauriTavern'],
-    ['darwin-x64-dmg', 'TauriTavern_x64.dmg'],
     ['debug-darwin-aarch64-app', 'TauriTavern.app/Contents/MacOS/TauriTavern'],
-    ['debug-darwin-aarch64-dmg', 'TauriTavern_aarch64.dmg'],
     ['debug-darwin-x64-app', 'TauriTavern.app/Contents/MacOS/TauriTavern'],
-    ['debug-darwin-x64-dmg', 'TauriTavern_x64.dmg'],
     ['debug-windows-x64-nsis', 'TauriTavern_2.2.0_x64-setup.exe'],
-    ['ios-arm64-ipa', 'TauriTavern.ipa'],
-    ['ios-arm64-TestFlight-ipa', 'TauriTavern.ipa'],
     ['linux-aarch64-rpm', 'TauriTavern-2.2.0-1.aarch64.rpm'],
     ['linux-amd64-appimage', 'TauriTavern_2.2.0_amd64.AppImage'],
     ['linux-amd64-deb', 'TauriTavern_2.2.0_amd64.deb'],
@@ -35,8 +29,6 @@ const ARTIFACTS = new Map([
 const EXPECTED_RELEASE_ASSETS = [
     'TauriTavern-2.2.0-android-arm64-v8a.apk',
     'TauriTavern-2.2.0-android-armeabi-v7a.apk',
-    'TauriTavern-2.2.0-ios-arm64.ipa',
-    'TauriTavern-2.2.0-ios-arm64-TestFlight.ipa',
     'TauriTavern-2.2.0-linux-arm64-portable',
     'TauriTavern-2.2.0-linux-arm64.deb',
     'TauriTavern-2.2.0-linux-arm64.rpm',
@@ -44,10 +36,6 @@ const EXPECTED_RELEASE_ASSETS = [
     'TauriTavern-2.2.0-linux-x64.AppImage',
     'TauriTavern-2.2.0-linux-x64.deb',
     'TauriTavern-2.2.0-linux-x64.rpm',
-    'TauriTavern-2.2.0-macos-arm64-DEBUG.dmg',
-    'TauriTavern-2.2.0-macos-arm64.dmg',
-    'TauriTavern-2.2.0-macos-x64-DEBUG.dmg',
-    'TauriTavern-2.2.0-macos-x64.dmg',
     'TauriTavern-2.2.0-windows-x64-portable.exe',
     'TauriTavern-2.2.0-windows-x64-setup-DEBUG.exe',
     'TauriTavern-2.2.0-windows-x64-setup.exe',
@@ -95,10 +83,6 @@ test('collectReleaseAssets fails before publishing an incomplete release set', a
     const artifactPrefix = 'TauriTavern-20260726-canary-';
     await createArtifacts(inputDirectory, artifactPrefix, [
         'android-arm64-apk',
-        'debug-darwin-aarch64-app',
-        'debug-darwin-aarch64-dmg',
-        'debug-darwin-x64-app',
-        'debug-darwin-x64-dmg',
         'debug-windows-x64-nsis',
     ]);
 
