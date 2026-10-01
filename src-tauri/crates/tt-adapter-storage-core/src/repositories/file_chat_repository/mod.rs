@@ -12,9 +12,9 @@ mod backup_inventory;
 mod backup_restore;
 mod backup_summary;
 mod cache;
+mod chat_commit;
 mod chat_dir_resolver;
 mod chat_metadata;
-mod chat_payload_commit;
 mod cold_swipes;
 mod extension_store;
 mod group_chat_repository_impl;
@@ -81,7 +81,7 @@ pub struct FileChatRepository {
     backups_dir: PathBuf,
     chat_commit_staging_dir: PathBuf,
     chat_commit_sessions:
-        Mutex<HashMap<uuid::Uuid, Arc<Mutex<chat_payload_commit::CommitSession>>>>,
+        Mutex<HashMap<uuid::Uuid, Arc<Mutex<Option<chat_commit::CommitSession>>>>>,
     path_write_locks: Arc<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>>,
     current_content_signatures: Mutex<ContentSignatureState>,
     memory_cache: Arc<Mutex<MemoryCache>>,
@@ -157,19 +157,11 @@ impl FileChatRepository {
             100,
             Duration::from_secs(30 * 60),
         )));
-        let summary_index_path = backups_dir
+        let summary_cache_dir = backups_dir
             .parent()
-            .map(|default_user_dir| {
-                default_user_dir
-                    .join("user")
-                    .join("cache")
-                    .join("chat_summary_index_v1.json")
-            })
-            .unwrap_or_else(|| backups_dir.join("chat_summary_index_v1.json"));
-        let summary_cache = Arc::new(Mutex::new(SummaryCache::new(
-            summary_index_path,
-            backups_dir.clone(),
-        )));
+            .map(|user_dir| user_dir.join("user").join("cache"))
+            .unwrap_or_else(|| backups_dir.clone());
+        let summary_cache = Arc::new(Mutex::new(SummaryCache::new(summary_cache_dir)));
         let backup_summary_index_path = backups_dir
             .parent()
             .map(|default_user_dir| {

@@ -5181,5 +5181,17 @@
     "Server": "伺服器",
     "Device name must contain 1–64 characters without control characters": "裝置名稱需為 1–64 個字元，不能包含控制字元。",
     "Enter an IP address and port, for example 192.168.1.10:50000": "請輸入 IP 位址和連接埠，例如 192.168.1.10:50000。",
-    "Invalid LAN device address or port": "區域網路裝置位址或連接埠無效。"
+    "Invalid LAN device address or port": "區域網路裝置位址或連接埠無效。",
+    "Controls token randomness.": "控制符元選擇的隨機性。",
+    "Preset name cannot be empty": "預設名稱不能為空。",
+    "Preset saved, but could not be applied.": "預設已儲存，但未能套用。",
+    "Chat message": "聊天訊息",
+    "Chat options": "聊天選項",
+    "Submit guidance": "提交指引",
+    "Generating…": "正在生成…",
+    "Ready": "就緒",
+    "Select message": "選取訊息",
+    "Previous reply": "上一則回覆",
+    "Next reply": "下一則回覆",
+    "Failed to copy message": "複製訊息失敗"
 }

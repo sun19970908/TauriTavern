@@ -1,6 +1,8 @@
 // Tauri commands
 pub mod agent_commands;
+pub mod agent_extension_tool_commands;
 mod agent_live_projection;
+pub mod agent_session_commands;
 pub mod asset_commands;
 pub mod avatar_commands;
 pub mod background_commands;
@@ -9,8 +11,8 @@ pub mod bridge;
 pub mod character_commands;
 pub mod chat_api_commands;
 pub mod chat_commands;
+pub mod chat_commit_commands;
 pub mod chat_completion_commands;
-pub mod chat_payload_commit_commands;
 pub mod chat_swipe_commands;
 mod chunk_body;
 pub mod content_commands;

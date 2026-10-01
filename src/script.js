@@ -26,7 +26,7 @@ import {
     initializeChatVirtualization,
     isChatVirtualizationEnabled,
 } from './tauri/main/services/chat-surface/chat-virtualization-state.js';
-import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
+import { initDrawers, getTopLevelDrawerPanel, isTopLevelDrawerOpen, setTopLevelDrawerOpen, toggleInlineDrawer } from './scripts/drawers.js';
 import { initializeCodeMirrorEditor } from './scripts/tauri/codemirror-editor.js';
 import { getStreamingRenderInterval, normalizeStreamingFps, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
 import {
@@ -71,10 +71,14 @@ import {
 } from './scripts/tauritavern/agent/agent-run-controller.js';
 import { agentErrorMessage } from './scripts/tauritavern/agent/agent-error-presenter.js';
 import { normalizeAgentContextPolicy } from './scripts/tauritavern/agent/agent-context-policy.js';
+import { createAgentPromptSnapshot } from './scripts/tauritavern/agent/agent-model-messages.js';
+import { buildPromptAssemblyPayload } from './tauri/main/api/agent-prompt-assembly.js';
 import { normalizeAgentSystemPrompt } from './scripts/tauritavern/agent/agent-system-prompt.js';
 import { readLegacyToolInvocations, stripOldToolTurns } from './scripts/tauritavern/tool-turn-projection.js';
 import {
     buildFrozenRunInputSnapshot,
+    updateFrozenMacroContext,
+    createMacroContextFromSnapshot,
     buildCurrentModelConnectionSnapshot,
     buildSettingsWithCurrentModelConnectionSnapshot,
     normalizeFrozenRunInputSnapshot,
@@ -165,6 +169,7 @@ import {
     importGroupChat,
     getGroupBlock,
     getGroupCharacterCardsLazy,
+    getGroupCharacterCardsSource,
     getGroupDepthPrompts,
 } from './scripts/group-chats.js';
 
@@ -203,6 +208,7 @@ import {
     getChatCompletionModel,
     isVertexAiClaudeModelId,
     createGenerationParameters,
+    createChatCompletionMacroContext,
     proxies,
     loadProxyPresets,
     selected_proxy,
@@ -353,18 +359,9 @@ import {
 } from './scripts/html-code-preview.js';
 import { getPresetManager, initPresetManager } from './scripts/preset-manager.js';
 import {
-    evaluateMacros,
     getLastMessageId,
-    getLastMessage,
-    getLastUserMessage,
-    getLastCharMessage,
-    getFirstIncludedMessageId,
-    getFirstDisplayedMessageId as getMacroFirstDisplayedMessageId,
-    getTimeSinceLastMessage,
     initMacros,
 } from './scripts/macros.js';
-import { findLastMessageId, getLastSwipeId, getCurrentSwipeId } from './scripts/macros/chat-state.js';
-import { snapshotVariableMacroValues } from './scripts/variables/values.js';
 import { currentUser, setUserControls } from './scripts/user.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup, fixToastrForDialogs } from './scripts/popup.js';
 import { renderTemplate, renderTemplateAsync } from './scripts/templates.js';
@@ -399,11 +396,13 @@ import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
+import { initPopupMenu } from './scripts/popup-menu.js';
 import { createGenerationIdleGate } from './scripts/util/generation-idle-gate.js';
 import { shouldEmitCharacterMessageEvents, shouldUnblockGenerationAfterUnhandledError } from './scripts/util/generation-lifecycle.js';
 import { AudioPlayer } from './scripts/audio-player.js';
+import { evaluateMacroEnv, captureContext as captureMacroContext } from './scripts/macros/macro-system.js';
 import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
-import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
+import { MessageFormatter } from './scripts/message-formatter.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { createStartupStatusOverlay } from './scripts/tauri/startup/startup-status-overlay.js';
@@ -748,16 +747,16 @@ registerHtmlCodePreviewParticipant({
 const chatSurface = installChatSurfaceRuntime({
     root: /** @type {HTMLElement} */ (chatElement[0]),
     getMessages: () => chat,
-    prepareMaterializeOptions: prepareMessageRegexOptions,
+    prepareMaterializeOptions: prepareMessageContent,
     formatMessageContent: (message, messageId) => getMessageTextHTML(message, { messageId }),
+    refreshMessageDetails: updateReasoningUI,
     prepareContentTransaction: prepareMesTextHtmlWithRuntimePolicy,
     emitEvent: eventSource.emit.bind(eventSource),
     materializeMessage: ({ message, messageId, frontendSourceHandoffEvent, materializeOptions }) => updateMessageElement(message, {
         messageId,
         frontendSourceHandoffEvent,
         adjustMediaScroll: materializeOptions?.adjustMediaScroll ?? SCROLL_BEHAVIOR.NONE,
-        regexSourceText: materializeOptions?.regexSourceText,
-        regexedText: materializeOptions?.regexedText,
+        messageHtml: materializeOptions?.messageHtml,
         transient: materializeOptions?.transient,
     }),
     syncMountedViewState: syncMountedChatViewState,
@@ -768,6 +767,7 @@ const chatSurface = installChatSurfaceRuntime({
 });
 
 export const finalizeMessageContent = chatSurface.finishContent;
+export const refreshChatContent = chatSurface.refreshContent;
 
 let dialogueResolve = null;
 let dialogueCloseStop = false;
@@ -1190,6 +1190,7 @@ async function firstLoadInit() {
         await checkOpenRouterAuth();
         syncMobileImmersiveFullscreenUi();
         initKeyboard();
+        initDrawers();
         initDynamicStyles();
         initTags();
         initBookmarks();
@@ -1260,7 +1261,7 @@ async function firstLoadInit() {
             }
         }
 
-        void autoloadLastChat().catch((error) => {
+        const initialChatLoad = autoloadLastChat().catch((error) => {
             console.error('Failed to auto-load the last chat:', error);
             toastr.error(t`Failed to auto-load the last chat. Check the console for details.`);
         });
@@ -1283,6 +1284,13 @@ async function firstLoadInit() {
                 await activateDeferredThirdPartyExtensions({ parallelism: 1 });
                 await eventSource.emit(event_types.EXTENSION_SETTINGS_LOADED);
                 doDailyExtensionUpdatesCheck();
+                await initialChatLoad;
+                try {
+                    await refreshChatContent();
+                } catch (error) {
+                    console.error('Failed to refresh messages after extension initialization:', error);
+                    toastr.error(t`Could not refresh message contents. Reopen the chat to try again.`);
+                }
             }
         })();
 
@@ -2228,6 +2236,8 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
     if (!Number.isInteger(id) || id < 0 || id >= chat.length) {
         throw new RangeError(`Invalid message id: ${String(id)}`);
     }
+    const element = chatSurface.getMessageElement(id);
+    const ownedFocus = element?.contains(document.activeElement);
     const canDeleteSwipe = swipeDeletionIndex !== undefined && swipeDeletionIndex !== null;
     if (canDeleteSwipe) {
         if (swipeDeletionIndex < 0) {
@@ -2244,6 +2254,7 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
     let deleteOnlySwipe = canDeleteSwipe;
     if (askConfirmation) {
         const result = await callGenericPopup(t`Are you sure you want to delete this message?`, POPUP_TYPE.CONFIRM, null, {
+            label: t`Delete Message`,
             okButton: canDeleteSwipe ? t`Delete Swipe` : t`Delete Message`,
             cancelButton: 'Cancel',
             customButtons: canDeleteSwipe ? [t`Delete Message`] : null,
@@ -2276,7 +2287,14 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
 
     refreshActiveSwipeButtons();
 
+    if (ownedFocus && document.activeElement === document.body) focusMessageOrInput(id);
     await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
+}
+
+function focusMessageOrInput(messageId) {
+    const element = chatSurface.getMessageElement(messageId) ?? chatSurface.getMessageElement(messageId - 1);
+    if (element) element.focus({ preventScroll: true });
+    else focusChatInput(ChatInputFocusIntent.RESTORATION);
 }
 
 export const reloadChatMutex = new SimpleMutex(reloadCurrentChatUnsafe);
@@ -2306,9 +2324,9 @@ export async function reloadCurrentChatUnsafe() {
     refreshSwipeButtons();
 }
 
-/**
- * Send the message currently typed into the chat box.
- */
+const userInputGenerateMutex = new SimpleMutex(generateFromChatInput);
+
+/** Send from every composer entry, allowing guidance during an active Agent run. */
 export async function sendTextareaMessage() {
     // don't proceed during swipeGenerate()
     if (swipeState == SWIPE_STATE.EDITING) {
@@ -2317,6 +2335,10 @@ export async function sendTextareaMessage() {
     }
     if (swipeState !== SWIPE_STATE.NONE) return; // don't proceed if mid-swipe.
     if (await maybeSubmitAgentGuidanceFromComposer()) return;
+    return await userInputGenerateMutex.update();
+}
+
+async function generateFromChatInput() {
     if (is_send_press) return;
     if (isExecutingCommandsFromChatInput) return;
 
@@ -2369,23 +2391,36 @@ function getAgentGuidanceComposerText() {
     return String($('#send_textarea').val() ?? '').trim();
 }
 
-function shouldOfferAgentGuidanceFromComposer() {
+/** Whether this draft can be submitted to the currently running Agent. */
+export function canSubmitAgentGuidance(text) {
     return hasActiveAgentRun()
-        && Boolean(getAgentGuidanceComposerText());
+        && Boolean(text.trim());
 }
 
-function syncAgentGuidanceComposerState() {
-    if (shouldOfferAgentGuidanceFromComposer()) {
+function syncChatInputState() {
+    const guidanceReady = canSubmitAgentGuidance(getAgentGuidanceComposerText());
+    if (guidanceReady) {
         document.body.dataset.agentGuidanceReady = 'true';
-        return;
+    } else {
+        delete document.body.dataset.agentGuidanceReady;
     }
-
-    delete document.body.dataset.agentGuidanceReady;
+    const label = guidanceReady ? 'Submit guidance' : 'Send a message';
+    $('#send_but').attr({
+        'aria-label': translate(label),
+        title: translate(label),
+        'data-i18n': `[aria-label]${label};[title]${label}`,
+    });
+    const status = document.getElementById('chat_generation_status');
+    const statusKey = document.body.dataset.generating === 'true' ? 'Generating…' : 'Ready';
+    if (status.dataset.i18n !== statusKey) {
+        status.dataset.i18n = statusKey;
+        status.textContent = translate(statusKey);
+    }
 }
 
 async function maybeSubmitAgentGuidanceFromComposer() {
-    if (!shouldOfferAgentGuidanceFromComposer()) {
-        syncAgentGuidanceComposerState();
+    if (!canSubmitAgentGuidance(getAgentGuidanceComposerText())) {
+        syncChatInputState();
         return false;
     }
 
@@ -2399,7 +2434,7 @@ async function maybeSubmitAgentGuidanceFromComposer() {
         },
     );
     if (result !== POPUP_RESULT.AFFIRMATIVE) {
-        syncAgentGuidanceComposerState();
+        syncChatInputState();
         return true;
     }
 
@@ -2411,21 +2446,10 @@ async function maybeSubmitAgentGuidanceFromComposer() {
     }
 
     $('#send_textarea').val('')[0]?.dispatchEvent(new Event('input', { bubbles: true }));
-    syncAgentGuidanceComposerState();
+    syncChatInputState();
     return true;
 }
 
-/**
- * Formats the message text into an HTML string using Markdown and other formatting.
- * @param {string} mes Message text
- * @param {string} ch_name Character name
- * @param {boolean} isSystem If the message was sent by the system
- * @param {boolean} isUser If the message was sent by the user
- * @param {number} messageId Message index in chat array
- * @param {Partial<DOMPurify.Config>} [sanitizerOverrides] DOMPurify sanitizer option overrides
- * @param {boolean} [isReasoning] If the message is reasoning output
- * @returns {string} HTML string
- */
 let nonSystemDepthByMesId = null;
 
 function rebuildNonSystemDepthByMesId() {
@@ -2456,7 +2480,7 @@ function getNonSystemDepth(messageId) {
     return depth >= 0 ? depth : undefined;
 }
 
-export function getMessageFormattingRegexContext(isUser, messageId, isReasoning = false) {
+function getMessageFormattingRegexContext(isUser, messageId, isReasoning = false) {
     const numericMessageId = Number(messageId);
     const placement = isReasoning
         ? regex_placement.REASONING
@@ -2472,114 +2496,55 @@ export function getMessageFormattingRegexContext(isUser, messageId, isReasoning 
     };
 }
 
-function normalizeMessageSystemFlag(chName, isSystem) {
-    return isSystem && chName === systemUserName;
-}
-
-function getMessageDisplayText(message) {
-    return message.extra?.display_text || message.mes;
-}
-
-function substituteFirstMessage(mes, chName, isSystem, isUser, messageId, isReasoning) {
-    if (Number(messageId) !== 0 || isSystem || isUser || isReasoning) {
-        return mes;
+// Preparation and completion stay inside the formatter; callers only receive HTML.
+function prepareMessageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false) {
+    if (!mes) return null;
+    if (Number(messageId) === 0 && !isSystem && !isUser && !isReasoning) {
+        // Display substitution must not rewrite the saved greeting or its swipe.
+        mes = substituteParams(mes, { name2Override: ch_name });
     }
-    // Rendering must not rewrite saved text or desynchronize the selected swipe.
-    return substituteParams(mes, undefined, chName);
-}
-
-function removeMessagePromptBias(mes, chName, isSystem, isUser) {
+    const sourceText = mes;
+    isSystem = isSystem && ch_name === systemUserName;
     const promptBias = power_user.user_prompt_bias && substituteParams(power_user.user_prompt_bias);
-    return !power_user.show_user_prompt_bias && chName && !isUser && !isSystem && promptBias && mes.startsWith(promptBias)
-        ? mes.slice(promptBias.length)
-        : mes;
+    if (!power_user.show_user_prompt_bias && ch_name && !isUser && !isSystem && promptBias && mes.startsWith(promptBias)) {
+        mes = mes.slice(promptBias.length);
+    }
+
+    const context = { ch_name, isSystem, isUser, messageId, isReasoning };
+    const { placement, depth } = getMessageFormattingRegexContext(isUser, messageId, isReasoning);
+    const regex = isSystem ? null : {
+        placement,
+        params: { characterOverride: ch_name, isMarkdown: true, depth },
+    };
+    if (regex) mes = MessageFormatter.runStage(MessageFormatter.stage.BEFORE_REGEX, mes, context);
+    return { sourceText, text: mes, context, regex, sanitizerOverrides };
 }
 
 /**
- * Prepares the regex output consumed by a ChatSurface materialization batch.
- * @param {{ messages: ChatMessage[]; messageIds: number[]; assertUnchanged?: boolean }} input
- * @returns {Promise<Map<number, { regexSourceText: string; regexedText: string }>>}
+ * Formats the message text into an HTML string using Markdown and other formatting.
+ * @param {string} mes Message text
+ * @param {string} ch_name Character name
+ * @param {boolean} isSystem If the message was sent by the system
+ * @param {boolean} isUser If the message was sent by the user
+ * @param {number} messageId Message index in chat array
+ * @param {Partial<DOMPurify.Config>} [sanitizerOverrides] DOMPurify sanitizer option overrides
+ * @param {boolean} [isReasoning] If the message is reasoning output
+ * @returns {string} HTML string
  */
-export async function prepareMessageRegexOptions({ messages, messageIds, assertUnchanged = true }) {
-    const requests = [];
-    const owners = [];
-
-    for (const messageId of messageIds) {
-        const message = messages[messageId];
-        if (!message) {
-            throw new Error(`Cannot prepare regex for missing message ${messageId}`);
-        }
-        if (message.role === 'tool') {
-            continue;
-        }
-
-        const isToolFloor = message.is_system === true
-            && message.is_user !== true
-            && Array.isArray(message.extra?.tool_invocations);
-        const chName = isToolFloor ? systemUserName : message.name;
-        const isSystem = normalizeMessageSystemFlag(chName, isToolFloor || message.is_system);
-        if (isSystem) {
-            continue;
-        }
-
-        const regexSourceText = substituteFirstMessage(
-            getMessageDisplayText(message),
-            chName,
-            isToolFloor || message.is_system,
-            message.is_user,
-            messageId,
-            false,
-        );
-        const { placement, depth } = getMessageFormattingRegexContext(message.is_user, messageId, false);
-        requests.push({
-            rawString: removeMessagePromptBias(regexSourceText, chName, isSystem, message.is_user),
-            placement,
-            params: { characterOverride: chName, isMarkdown: true, depth },
-        });
-        owners.push({ messageId, message, regexSourceText });
-    }
-
-    const texts = await getRegexedStringBatchAsync(requests);
-    if (assertUnchanged) {
-        for (const owner of owners) {
-            if (messages[owner.messageId] !== owner.message) {
-                throw new Error(`Message ${owner.messageId} changed while preparing regex`);
-            }
-        }
-    }
-    return new Map(owners.map((owner, index) => [owner.messageId, {
-        regexSourceText: owner.regexSourceText,
-        regexedText: texts[index],
-    }]));
+export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false) {
+    const input = prepareMessageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides, isReasoning);
+    const text = input?.regex
+        ? getRegexedString(input.text, input.regex.placement, input.regex.params)
+        : input?.text;
+    return finishMessageFormatting(input, text);
 }
 
-export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false, formattingOptions = {}) {
-    if (!mes) {
-        return '';
-    }
-
-    if (!formattingOptions?.regexPrepared) {
-        mes = substituteFirstMessage(mes, ch_name, isSystem, isUser, messageId, isReasoning);
-    }
-
-    mesForShowdownParse = formattingOptions?.regexSourceText ?? mes;
-
-    // Let comment and hidden messages have markdown.
-    isSystem = normalizeMessageSystemFlag(ch_name, isSystem);
-
-    if (!formattingOptions?.regexPrepared) {
-        mes = removeMessagePromptBias(mes, ch_name, isSystem, isUser);
-        if (!isSystem) {
-            const { placement: regexPlacement, depth } = getMessageFormattingRegexContext(isUser, messageId, isReasoning);
-
-            // Always override the character name
-            mes = getRegexedString(mes, regexPlacement, {
-                characterOverride: ch_name,
-                isMarkdown: true,
-                depth: depth,
-            });
-        }
-    }
+function finishMessageFormatting(input, mes = input?.text) {
+    if (!input) return '';
+    const { ch_name, isSystem, isUser } = input.context;
+    const { sanitizerOverrides } = input;
+    mesForShowdownParse = input.sourceText;
+    if (!isSystem) mes = MessageFormatter.runStage(MessageFormatter.stage.AFTER_REGEX, mes, input.context);
 
     if (power_user.auto_fix_generated_markdown) {
         mes = fixMarkdown(mes, true);
@@ -2657,6 +2622,8 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         mes = mes.replace(/<code(.*)>[\s\S]*?<\/code>/g, function (match) {
             return match.replace(/&amp;/g, '&');
         });
+
+        mes = MessageFormatter.runStage(MessageFormatter.stage.AFTER_MARKDOWN, mes, input.context);
     }
 
     if (!power_user.allow_name2_display && ch_name && !isUser && !isSystem) {
@@ -3220,12 +3187,11 @@ export function addCopyToCodeBlocks(messageElement) {
 
             const copyButton = document.createElement('i');
             copyButton.classList.add('fa-solid', 'fa-copy', 'code-copy', 'interactable');
-            copyButton.title = 'Copy code';
+            copyButton.title = t`Copy code`;
+            copyButton.dataset.i18n = '[title]Copy code';
             codeBlock.appendChild(copyButton);
-            copyButton.addEventListener('click', function (e) {
+            copyButton.addEventListener('click', async function (e) {
                 e.stopPropagation();
-            });
-            copyButton.addEventListener('pointerup', async function () {
                 const text = codeBlock.textContent;
                 await copyText(text);
                 toastr.info(t`Copied!`, '', { timeOut: 2000 });
@@ -3274,40 +3240,59 @@ function getToolMessageHTML(message, messageId) {
     return null;
 }
 
-/**
- * Gets messageFormatting for a ChatMessage object.
- * @param {ChatMessage} message
- * @param {object} options Options
- * @param {number} [options.messageId] Message ID
- * @param {string} [options.regexSourceText] Original display text before regex
- * @param {string} [options.regexedText] Precomputed display regex output
- * @returns {string} Formatted message HTML
- */
-function getMessageTextHTML(message, { messageId = chat.indexOf(message), regexSourceText, regexedText }) {
-    // if mes.extra.uses_system_ui is true, set an override on the sanitizer options
-    /** @type {Partial<DOMPurify.Config>} */
-    const sanitizerOverrides = message.extra?.uses_system_ui ? { MESSAGE_ALLOW_SYSTEM_UI: true } : {};
+/** The message owns its display source and sanitizer policy in both execution modes. */
+function getMessageFormattingArgs(message, messageId) {
     const isToolFloor = message.is_system === true
         && message.is_user !== true
         && Array.isArray(message.extra?.tool_invocations);
-    const invocations = isToolFloor
-        ? readLegacyToolInvocations(message, messageId).invocations
-        : null;
+    const text = isToolFloor
+        ? ToolManager.formatToolInvocationMessage(readLegacyToolInvocations(message, messageId).invocations)
+        : (message.extra?.display_text || message.mes);
+    return [
+        text,
+        isToolFloor ? systemUserName : message.name,
+        isToolFloor || message.is_system,
+        message.is_user,
+        messageId,
+        message.extra?.uses_system_ui ? { MESSAGE_ALLOW_SYSTEM_UI: true } : {},
+    ];
+}
 
-    const hasRegexedText = regexedText !== undefined;
+/** @param {ChatMessage} message @param {{ messageId?: number }} options */
+function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
     return getToolMessageHTML(message, messageId)
-        ?? messageFormatting(
-            hasRegexedText
-                ? regexedText
-                : (invocations ? ToolManager.formatToolInvocationMessage(invocations) : getMessageDisplayText(message)),
-            isToolFloor ? systemUserName : message.name,
-            isToolFloor || message.is_system,
-            message.is_user,
-            messageId,
-            sanitizerOverrides,
-            false,
-            { regexPrepared: hasRegexedText, regexSourceText },
-        );
+        ?? messageFormatting(...getMessageFormattingArgs(message, messageId));
+}
+
+/**
+ * Batch formatting uses the same preparation and completion as messageFormatting.
+ * Only regex execution is asynchronous; no partial formatting state escapes.
+ * @param {{ messages: ChatMessage[]; messageIds: number[] }} input
+ * @returns {Promise<Map<number, { messageHtml: string }>>}
+ */
+async function prepareMessageContent({ messages, messageIds }) {
+    const entries = messageIds.map(messageId => {
+        const message = messages[messageId];
+        const html = getToolMessageHTML(message, messageId);
+        const input = html === null ? prepareMessageFormatting(...getMessageFormattingArgs(message, messageId)) : null;
+        return { messageId, html, input };
+    });
+    const requests = entries.filter(entry => entry.input?.regex)
+        .map(({ input }) => ({ rawString: input.text, ...input.regex }));
+    const texts = await getRegexedStringBatchAsync(requests);
+    const results = new Map();
+    let regexIndex = 0;
+    let start = performance.now();
+    for (const { messageId, html, input } of entries) {
+        results.set(messageId, {
+            messageHtml: html ?? finishMessageFormatting(input, input?.regex ? texts[regexIndex++] : input?.text),
+        });
+        if (performance.now() - start > 8) {
+            await delay(0);
+            start = performance.now();
+        }
+    }
+    return results;
 }
 
 /** @type {WeakMap<ChatMessage, Array<ChatToolCall & { result?: string, error?: boolean }>>} */
@@ -3450,12 +3435,11 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
  * @param {JQuery<HTMLElement>} [options.messageElement=messageTemplate.clone()] This message element will be updated with the ChatMessage object.
  * @param {SCROLL_BEHAVIOR} [options.adjustMediaScroll=SCROLL_BEHAVIOR.NONE] Scroll behavior option passed to appendMediaToMessage.
  * @param {string|null} [options.frontendSourceHandoffEvent=null] Event after which detached frontend source cover is released.
- * @param {string} [options.regexSourceText] Original display text before regex.
- * @param {string} [options.regexedText] Precomputed display regex output.
+ * @param {string} [options.messageHtml] Fully formatted message body.
  * @param {boolean} [options.transient=false] Whether to defer content processors and runtimes.
  * @returns {JQuery<HTMLElement>} Rendered HTMLElement.
  */
-export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, frontendSourceHandoffEvent = null, regexSourceText, regexedText, transient = false } = {}) {
+export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE, frontendSourceHandoffEvent = null, messageHtml, transient = false } = {}) {
     let avatarImg = getThumbnailUrl('persona', user_avatar);
 
     //for non-user messages
@@ -3479,7 +3463,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     }
     const momentDate = timestampToMoment(mes.send_date);
     const timestamp = momentDate.isValid() ? momentDate.format('LL LT') : '';
-    const messageHTML = getMessageTextHTML(mes, { messageId, regexSourceText, regexedText });
+    const messageHTML = messageHtml ?? getMessageTextHTML(mes, { messageId });
     const bookmarkLink = mes?.extra?.bookmark_link;
     const tokenCount = mes.extra?.token_count;
     const { timerValue, timerTitle, tokenRate } = formatGenerationTimer(mes.gen_started, mes.gen_finished, mes.extra?.token_count, mes.extra?.reasoning_duration, mes.extra?.time_to_first_token);
@@ -3501,6 +3485,16 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     messageElement.find('.ch_name .name_text').text(mes.name);
     messageElement.find('.timestamp').text(timestamp).attr('title', `${mes.extra?.api ? mes.extra.api + ' - ' : ''}${mes.extra?.model ?? ''}`);
     messageElement.find('.mesIDDisplay').text(`#${messageId}`);
+    const root = messageElement[0];
+    const author = root.querySelector('.name_text');
+    const number = root.querySelector('.mesIDDisplay');
+    author.id ||= `message-author-${uuidv4()}`;
+    number.id ||= `message-number-${uuidv4()}`;
+    root.setAttribute('aria-labelledby', `${author.id} ${number.id}`);
+    const actions = root.querySelector('.extraMesButtons');
+    actions.id ||= `message-actions-${uuidv4()}`;
+    root.querySelector('.extraMesButtonsHint').setAttribute('aria-controls', actions.id);
+    root.querySelector('.del_checkbox').setAttribute('aria-describedby', `${author.id} ${number.id}`);
     tokenCount && messageElement.find('.tokenCounterDisplay').text(`${tokenCount}t`);
     mes.title && messageElement.attr('title', mes.title);
     timerValue && messageElement.find('.mes_timer').attr('title', timerTitle).text(timerValue);
@@ -3635,23 +3629,13 @@ export function substituteParamsExtended(content, additionalMacro = {}, postProc
  * @returns {string} The string with substituted parameters.
  */
 export function substituteParamsLegacy(content, _name1, _name2, _original, _group, _replaceCharacterCard = true, additionalMacro = {}, postProcessFn = (x) => x) {
-    if (!content) {
-        return '';
-    }
+    return substituteParams(content, {
+        name1Override: _name1, name2Override: _name2, original: _original, groupOverride: _group,
+        replaceCharacterCard: _replaceCharacterCard, dynamicMacros: additionalMacro, postProcessFn,
+    });
+}
 
-    // If experimental macro engine is enabled, use it. This code will be cleaned up in the future.
-    if (power_user?.experimental_macro_engine) {
-        return substituteParams(content, {
-            name1Override: _name1,
-            name2Override: _name2,
-            original: _original,
-            groupOverride: _group,
-            replaceCharacterCard: _replaceCharacterCard ?? true,
-            dynamicMacros: additionalMacro ?? {},
-            postProcessFn: postProcessFn ?? ((x) => x),
-        });
-    }
-
+function suggestExperimentalMacroEngine(content) {
     // Try to roughly detect experimental macro features to show the onboarding if needed.
     // This does not have to be 100% accurate, only best effort what we can quickly check.
     // Only do this if the warning wasn't shown yet, to prevent needless regex checks.
@@ -3667,103 +3651,6 @@ export function substituteParamsLegacy(content, _name1, _name2, _original, _grou
         if (feature) void onboardingExperimentalMacroEngine(feature);
     }
 
-    const environment = {};
-
-    if (typeof _original === 'string') {
-        let originalSubstituted = false;
-        environment.original = () => {
-            if (originalSubstituted) {
-                return '';
-            }
-
-            originalSubstituted = true;
-            return _original;
-        };
-    }
-
-    const getGroupValue = (includeMuted) => {
-        if (typeof _group === 'string') {
-            return _group;
-        }
-
-        if (selected_group) {
-            const members = groups.find(x => x.id === selected_group)?.members;
-            /** @type {string[]} */
-            const disabledMembers = groups.find(x => x.id === selected_group)?.disabled_members ?? [];
-            const isMuted = x => includeMuted ? true : !disabledMembers.includes(x);
-            const names = Array.isArray(members)
-                ? members.filter(isMuted).map(m => characters.find(c => c.avatar === m)?.name).filter(Boolean).join(', ')
-                : '';
-            return names;
-        } else {
-            return _name2 ?? name2;
-        }
-    };
-
-    const getNotCharValue = () => {
-        const currentUser = _name1 ?? name1;
-        const currentSpeaker = _name2 ?? name2;
-
-        // Single character chat
-        if (!selected_group) {
-            return currentUser;
-        }
-
-        // Group chat
-        const members = groups.find(x => x.id === selected_group)?.members;
-
-        if (!Array.isArray(members)) {
-            return currentUser;
-        }
-
-        const memberNames = members
-            .map(m => characters.find(c => c.avatar === m)?.name)
-            .filter(Boolean); // Filter out any null/undefined names
-
-        // Filter out the current speaker and add the user
-        const otherMembers = memberNames.filter(name => name !== currentSpeaker);
-        otherMembers.push(currentUser);
-
-        return otherMembers.join(', ');
-    };
-
-    if (_replaceCharacterCard) {
-        const fields = getCharacterCardFields();
-        environment.charPrompt = fields.system || '';
-        environment.charInstruction = environment.charJailbreak = fields.jailbreak || '';
-        environment.description = fields.description || '';
-        environment.personality = fields.personality || '';
-        environment.scenario = fields.scenario || '';
-        environment.persona = fields.persona || '';
-        environment.mesExamples = () => {
-            const isInstruct = power_user.instruct.enabled && main_api !== 'openai';
-            const mesExamplesArray = parseMesExamples(fields.mesExamples, isInstruct);
-            if (isInstruct) {
-                const instructExamples = formatInstructModeExamples(mesExamplesArray, name1, name2);
-                return instructExamples.join('');
-            }
-            return mesExamplesArray.join('');
-        };
-        environment.mesExamplesRaw = fields.mesExamples || '';
-        environment.charVersion = fields.version || '';
-        environment.char_version = fields.version || '';
-        environment.charDepthPrompt = fields.charDepthPrompt || '';
-        environment.creatorNotes = fields.creatorNotes || '';
-    }
-
-    // Must be substituted last so that they're replaced inside {{description}}
-    environment.user = _name1 ?? name1;
-    environment.char = _name2 ?? name2;
-    environment.group = environment.charIfNotGroup = getGroupValue(true);
-    environment.groupNotMuted = getGroupValue(false);
-    environment.notChar = getNotCharValue();
-    environment.model = getGeneratingModel();
-
-    if (additionalMacro && typeof additionalMacro === 'object') {
-        Object.assign(environment, additionalMacro);
-    }
-
-    return evaluateMacros(content, environment, postProcessFn);
 }
 
 /** @typedef {import('./scripts/macros/engine/MacroRegistry.js').MacroHandler} MacroHandler */
@@ -3786,38 +3673,20 @@ export function substituteParamsLegacy(content, _name1, _name2, _original, _grou
  */
 export function substituteParams(content, options = {}) {
     if (!content) return '';
-
     if (typeof content !== 'string') {
         console.warn('substituteParams: content will be coerced to string', content);
         content = String(content);
     }
-
-    // Handle legacy signature calls to substituteParams
-    // We'll simply re-route them to a temporary legacy function. In the future, we'll remove this and cleanly build the options object ourselves.
     const isOptionsObject = options && typeof options === 'object' && !Array.isArray(options);
-    if (!isOptionsObject) {
+    // An omitted user override is still a positional call when later arguments exist.
+    if (!isOptionsObject || (arguments.length > 2 && arguments[1] === undefined)) {
         return substituteParamsLegacy.call(this, ...arguments);
     }
-
-    // Keep the new macro engine behind a feature switch for now
-    if (!power_user?.experimental_macro_engine) {
-        return substituteParamsLegacy(content, options.name1Override, options.name2Override, options.original, options.groupOverride, options.replaceCharacterCard, options.dynamicMacros, options.postProcessFn);
-    }
-
-    const ctx = /** @type {import('./scripts/macros/engine/MacroEnvBuilder.js').MacroEnvRawContext} */ ({
-        content,
-        name1Override: options.name1Override,
-        name2Override: options.name2Override,
-        original: options.original,
-        groupOverride: options.groupOverride,
-        replaceCharacterCard: options.replaceCharacterCard ?? true,
-        dynamicMacros: options.dynamicMacros ?? {},
-        postProcessFn: options.postProcessFn ?? ((x) => x),
-    });
-
-    const env = MacroEnvBuilder.buildFromRawEnv(ctx);
-    const result = MacroEngine.evaluate(content, env);
-    return result;
+    const env = MacroEnvBuilder.buildFromRawEnv({
+        ...options, content, replaceCharacterCard: options.replaceCharacterCard ?? true,
+    }, power_user.experimental_macro_engine ? 'new' : 'legacy');
+    if (env.engine === 'legacy') suggestExperimentalMacroEngine(content);
+    return evaluateMacroEnv(content, env);
 }
 
 
@@ -4199,78 +4068,50 @@ export function createLazyFields(resolvers) {
 }
 
 /**
- * Returns the character card fields for the current character as lazy getters.
- * Each field is only processed (baseChatReplace) when first accessed.
+ * Select raw character inputs without expanding their macros.
  * @param {Object} [options={}]
  * @param {number} [options.chid] Optional character index
- * @returns {CharacterCardFields} Character card fields with lazy evaluation
  */
-export function getCharacterCardFieldsLazy({ chid = undefined } = {}) {
+export function getCharacterCardFieldsSource({ chid = undefined } = {}) {
     const currentChid = chid ?? this_chid;
     const character = characters[currentChid];
-
-    // For group chats, we need to check if group cards should be used
-    const useGroupCards = selected_group && character;
-    const groupCardsLazy = useGroupCards ? getGroupCharacterCardsLazy(selected_group, Number(currentChid)) : null;
-
-    /** @type {Record<string, () => string|string[]>} */
-    const resolvers = {
-        persona: () => baseChatReplace(power_user.persona_description?.trim()),
-        system: () => {
-            if (!character) return '';
-            const systemPrompt = chat_metadata.system_prompt || character.data?.system_prompt || '';
-            return power_user.prefer_character_prompt ? baseChatReplace(systemPrompt.trim()) : '';
-        },
-        jailbreak: () => {
-            if (!character) return '';
-            return power_user.prefer_character_jailbreak ? baseChatReplace(character.data?.post_history_instructions?.trim()) : '';
-        },
-        version: () => character?.data?.character_version ?? '',
-        charDepthPrompt: () => {
-            if (!character) return '';
-            return baseChatReplace(character.data?.extensions?.depth_prompt?.prompt?.trim());
-        },
-        creatorNotes: () => {
-            if (!character) return '';
-            return baseChatReplace(character.data?.creator_notes?.trim());
-        },
-        // These four fields may be overridden by group cards
-        description: () => {
-            if (groupCardsLazy) return groupCardsLazy.description;
-            if (!character) return '';
-            return baseChatReplace(character.description?.trim());
-        },
-        personality: () => {
-            if (groupCardsLazy) return groupCardsLazy.personality;
-            if (!character) return '';
-            return baseChatReplace(character.personality?.trim());
-        },
-        scenario: () => {
-            if (groupCardsLazy) return groupCardsLazy.scenario;
-            if (!character) return '';
-            const scenarioText = chat_metadata.scenario || character.scenario || '';
-            return baseChatReplace(scenarioText.trim());
-        },
-        mesExamples: () => {
-            if (groupCardsLazy) return groupCardsLazy.mesExamples;
-            if (!character) return '';
-            const exampleDialog = chat_metadata.mes_example || character.mes_example || '';
-            return baseChatReplace(exampleDialog.trim());
-        },
-        firstMessage: () => {
-            if (!character) return '';
-            const firstMes = character.first_mes?.trim() || '';
-            return baseChatReplace(firstMes);
-        },
-        alternateGreetings: () => {
-            if (!character) return [];
-            const altGreetings = character.data?.alternate_greetings;
-            if (!Array.isArray(altGreetings)) return [];
-            return altGreetings.map(greeting => baseChatReplace(greeting?.trim()));
-        },
+    return {
+        persona: power_user.persona_description?.trim() ?? '',
+        system: character && power_user.prefer_character_prompt
+            ? (chat_metadata.system_prompt || character.data?.system_prompt || '').trim() : '',
+        jailbreak: character && power_user.prefer_character_jailbreak
+            ? character.data?.post_history_instructions?.trim() ?? '' : '',
+        version: character?.data?.character_version ?? '',
+        charDepthPrompt: character?.data?.extensions?.depth_prompt?.prompt?.trim() ?? '',
+        creatorNotes: character?.data?.creator_notes?.trim() ?? '',
+        description: character?.description?.trim() ?? '',
+        personality: character?.personality?.trim() ?? '',
+        scenario: character ? (chat_metadata.scenario || character.scenario || '').trim() : '',
+        mesExamples: character ? (chat_metadata.mes_example || character.mes_example || '').trim() : '',
+        firstMessage: character?.first_mes?.trim() ?? '',
+        alternateGreetings: Array.isArray(character?.data?.alternate_greetings)
+            ? character.data.alternate_greetings.map(value => value?.trim() ?? '') : [],
+        groupCards: selected_group && character ? getGroupCharacterCardsSource(selected_group, Number(currentChid)) : null,
     };
+}
 
+/** Interpret selected card inputs lazily, using the caller's text evaluator. */
+export function createCharacterCardFields(source, replace = baseChatReplace) {
+    const groupCards = getGroupCharacterCardsLazy(null, null, { source: source.groupCards, replace });
+    const resolvers = {};
+    for (const key of ['system', 'jailbreak', 'persona', 'charDepthPrompt', 'creatorNotes', 'firstMessage']) {
+        resolvers[key] = () => replace(source[key]);
+    }
+    for (const key of ['description', 'personality', 'scenario', 'mesExamples']) {
+        resolvers[key] = () => groupCards ? groupCards[key] : replace(source[key]);
+    }
+    resolvers.version = () => source.version;
+    resolvers.alternateGreetings = () => source.alternateGreetings.map(value => replace(value));
     return createLazyFields(resolvers);
+}
+
+export function getCharacterCardFieldsLazy({ chid = undefined } = {}) {
+    return createCharacterCardFields(getCharacterCardFieldsSource({ chid }));
 }
 
 /**
@@ -4299,117 +4140,45 @@ export function getCharacterCardFields({ chid = undefined } = {}) {
     };
 }
 
-function buildAgentPromptMacroContext(promptInputs = {}) {
-    const fields = getCharacterCardFields();
-    const charName = String(promptInputs.name2 ?? name2 ?? '');
-    const userName = String(name1 ?? '');
-    const mesExamplesRaw = String(fields.mesExamples ?? '');
-    const now = moment();
-
+/** Project already evaluated character fields and captured facts for native read-only substitution. */
+function buildAgentReadOnlyMacros(context, fields, examples) {
+    const now = moment(context.now);
     return {
-        schemaVersion: 1,
-        names: {
-            user: userName,
-            char: charName,
-            group: getAgentPromptMacroGroupValue({ currentChar: charName, includeMuted: true }),
-            groupNotMuted: getAgentPromptMacroGroupValue({ currentChar: charName, includeMuted: false }),
-            notChar: getAgentPromptMacroGroupValue({
-                currentChar: charName,
-                filterOutChar: true,
-                includeUser: userName,
-            }),
-        },
-        character: {
-            charPrompt: String(fields.system || promptInputs.systemPromptOverride || ''),
-            charInstruction: String(fields.jailbreak || promptInputs.jailbreakPromptOverride || ''),
-            charJailbreak: String(fields.jailbreak || promptInputs.jailbreakPromptOverride || ''),
-            description: String(promptInputs.charDescription ?? fields.description ?? ''),
-            personality: String(promptInputs.charPersonality ?? fields.personality ?? ''),
-            scenario: String(promptInputs.scenario ?? fields.scenario ?? ''),
-            persona: String(fields.persona ?? ''),
-            personaPosition: Number(power_user.persona_description_position),
-            mesExamplesRaw,
-            mesExamples: parseMesExamples(mesExamplesRaw, false).join(''),
-            charDepthPrompt: String(fields.charDepthPrompt ?? ''),
-            creatorNotes: String(fields.creatorNotes ?? ''),
-            version: String(fields.version ?? ''),
-            firstMessage: String(fields.firstMessage ?? ''),
-            alternateGreetings: Array.isArray(fields.alternateGreetings)
-                ? fields.alternateGreetings.map(value => String(value ?? ''))
-                : [],
-        },
-        system: {
-            model: String(getGeneratingModel() ?? ''),
-        },
-        chat: {
-            lastMessageId: String(findLastMessageId(chat) ?? ''),
-            lastSwipeId: String(getLastSwipeId(chat) ?? ''),
-            currentSwipeId: String(getCurrentSwipeId(chat) ?? ''),
+        characterValues: {
+            charPrompt: fields.system,
+            charInstruction: fields.jailbreak,
+            description: fields.description,
+            personality: fields.personality,
+            scenario: fields.scenario,
+            persona: fields.persona,
+            personaPosition: context.character.personaPosition,
+            mesExamplesRaw: fields.mesExamples,
+            mesExamples: examples,
+            charDepthPrompt: fields.charDepthPrompt,
+            creatorNotes: fields.creatorNotes,
+            version: fields.version,
+            firstMessage: fields.firstMessage,
+            alternateGreetings: fields.alternateGreetings,
         },
         builtins: {
-            ...getInstructMacroValues({ charPrompt: fields.system }),
+            ...getInstructMacroValues({ charPrompt: fields.system }, context.settings),
             time: now.format('LT'),
             date: now.format('LL'),
             weekday: now.format('dddd'),
             isotime: now.format('HH:mm'),
             isodate: now.format('YYYY-MM-DD'),
-            idleDuration: getTimeSinceLastMessage(now),
-            lastMessage: getLastMessage(),
-            lastUserMessage: getLastUserMessage(),
-            lastCharMessage: getLastCharMessage(),
-            firstIncludedMessageId: String(getFirstIncludedMessageId() ?? ''),
-            firstDisplayedMessageId: String(getMacroFirstDisplayedMessageId() ?? ''),
-            allChatRange: chat.length ? `0-${chat.length - 1}` : '',
-            input: String($('#send_textarea').val() ?? ''),
-            isMobile: String(isMobile()),
-            lastGenerationType: String(promptInputs.type || 'normal'),
-            maxPrompt: String(getMaxPromptTokens()),
-            maxContext: String(getMaxContextTokens()),
-            maxResponse: String(getMaxResponseTokens()),
-            reasoningPrefix: String(power_user.reasoning.prefix ?? ''),
-            reasoningSuffix: String(power_user.reasoning.suffix ?? ''),
-            reasoningSeparator: String(power_user.reasoning.separator ?? ''),
+            ...Object.fromEntries(['idleDuration', 'lastMessage', 'lastUserMessage', 'lastCharMessage',
+                'firstIncludedMessageId', 'firstDisplayedMessageId', 'allChatRange']
+                .map(key => [key, String(context.chat[key] ?? '')])),
+            ...Object.fromEntries(['input', 'isMobile', 'lastGenerationType']
+                .map(key => [key, String(context.state[key])])),
+            ...Object.fromEntries(['maxPrompt', 'maxContext', 'maxResponse']
+                .map(key => [key, String(context.system[key])])),
+            reasoningPrefix: context.settings.reasoning.prefix ?? '',
+            reasoningSuffix: context.settings.reasoning.suffix ?? '',
+            reasoningSeparator: context.settings.reasoning.separator ?? '',
         },
     };
-}
-
-/**
- * 采集 SillyTavern 变量快照（只读），供 skill 脚本沙箱 `context.variables` 使用。
- * local 对应 chat_metadata.variables（per-chat），global 对应
- * extension_settings.variables.global（跨 chat）。值保持原始存储格式。
- * @returns {{ local: Record<string, any>, global: Record<string, any> }}
- */
-function buildAgentVariablesSnapshot() {
-    return {
-        local: { ...(chat_metadata?.variables ?? {}) },
-        global: { ...(extension_settings?.variables?.global ?? {}) },
-    };
-}
-
-function getAgentPromptMacroGroupValue({
-    currentChar = '',
-    includeMuted = false,
-    filterOutChar = false,
-    includeUser = null,
-} = {}) {
-    if (!selected_group) {
-        return filterOutChar ? String(includeUser ?? '') : String(currentChar ?? '');
-    }
-
-    const group = groups.find(x => x && x.id === selected_group);
-    const members = Array.isArray(group?.members) ? group.members : [];
-    const disabledMembers = Array.isArray(group?.disabled_members) ? group.disabled_members : [];
-    const names = members
-        .filter(id => includeMuted || !disabledMembers.includes(id))
-        .map(id => characters.find(character => character && character.avatar === id)?.name)
-        .filter(name => typeof name === 'string' && name)
-        .filter(name => !filterOutChar || name !== currentChar);
-
-    if (includeUser) {
-        names.push(String(includeUser));
-    }
-
-    return names.join(', ');
 }
 
 /**
@@ -4417,7 +4186,7 @@ function getAgentPromptMacroGroupValue({
  * @param {string} examplesStr
  * @returns {string[]} Examples array with block heading
  */
-export function parseMesExamples(examplesStr, isInstruct) {
+export function parseMesExamples(examplesStr, isInstruct, { settings = power_user, api = main_api, substitute = substituteParams } = {}) {
     if (!examplesStr || examplesStr.length === 0 || examplesStr === '<START>') {
         return [];
     }
@@ -4426,8 +4195,8 @@ export function parseMesExamples(examplesStr, isInstruct) {
         examplesStr = '<START>\n' + examplesStr.trim();
     }
 
-    const exampleSeparator = power_user.context.example_separator ? `${substituteParams(power_user.context.example_separator)}\n` : '';
-    const blockHeading = (main_api === 'openai' || isInstruct) ? '<START>\n' : exampleSeparator;
+    const exampleSeparator = settings.context.example_separator ? `${substitute(settings.context.example_separator)}\n` : '';
+    const blockHeading = (api === 'openai' || isInstruct) ? '<START>\n' : exampleSeparator;
     const splitExamples = examplesStr.split(/<START>/gi).slice(1).map(block => `${blockHeading}${block.trim()}\n`);
 
     return splitExamples;
@@ -4451,7 +4220,9 @@ function showStopButton() {
 function hideStopButton() {
     // prevent NOOP, because hideStopButton() gets called multiple times
     if ($('#mes_stop').css('display') !== 'none') {
+        const restoreFocus = document.activeElement === document.getElementById('mes_stop');
         $('#mes_stop').css({ 'display': 'none' });
+        if (restoreFocus) focusChatInput(ChatInputFocusIntent.RESTORATION);
         eventSource.emit(event_types.GENERATION_ENDED, chat.length);
     }
 }
@@ -5553,6 +5324,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         await sendMessageAsUserAtProviderBarrier(oai_settings.send_if_empty.trim(), messageBias);
     }
 
+    const characterFields = getCharacterCardFields();
     let {
         description,
         personality,
@@ -5563,7 +5335,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         jailbreak,
         charDepthPrompt,
         creatorNotes,
-    } = getCharacterCardFields();
+    } = characterFields;
 
     // Depth prompt (character-specific A/N)
     removeDepthPrompts();
@@ -5734,6 +5506,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     }
 
     let mesExamplesArray = parseMesExamples(mesExamples, isInstruct);
+    const characterExamples = mesExamplesArray.join('');
 
     // Set non-WI AN
     setFloatingPrompt();
@@ -6378,6 +6151,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     let thisPromptBits = [];
 
     let generate_data;
+    let agentPromptInputs;
     let toolData;
     switch (main_api) {
         case 'koboldhorde':
@@ -6446,28 +6220,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             }, dryRun);
             toolData = evaluatedToolData;
             generate_data = { prompt: prompt };
-            if (agentMode) {
-                const currentModelConnection = await buildCurrentModelConnectionSnapshot({
-                    settings: oai_settings,
-                    model: getChatCompletionModel(oai_settings),
-                    secretKey: resolveSecretKey(),
-                    secretState: secret_state,
-                });
-                const macroContext = buildAgentPromptMacroContext(promptInputs);
-                const variables = buildAgentVariablesSnapshot();
-                generate_data.frozenRunInputSnapshot = buildFrozenRunInputSnapshot({
-                    generationType: type,
-                    promptInputs,
-                    worldInfoActivation,
-                    macroContext: {
-                        ...macroContext,
-                        variableValues: snapshotVariableMacroValues(variables,
-                            power_user.experimental_macro_engine ? value => MacroEngine.normalizeMacroResult(value) : String),
-                    },
-                    variables,
-                    currentModelConnection,
-                });
-            }
+            if (agentMode) agentPromptInputs = promptInputs;
 
             // TODO: move these side-effects somewhere else, so this switch-case solely sets generate_data
             // counts will return false if the user has not enabled the token breakdown feature
@@ -6483,6 +6236,25 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     }
 
     await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun);
+
+    // Extensions finish their prompt work before the Run takes ownership of its inputs.
+    // This also runs for SDK dry-runs, whose listener retains generate_data until Generate returns.
+    if (agentMode) {
+        const context = captureMacroContext();
+        context.state.lastGenerationType = type || 'normal';
+        const currentModelConnection = await buildCurrentModelConnectionSnapshot({
+            settings: oai_settings,
+            model: getChatCompletionModel(oai_settings),
+            secretKey: resolveSecretKey(),
+            secretState: secret_state,
+        });
+        generate_data.frozenRunInputSnapshot = buildFrozenRunInputSnapshot(updateFrozenMacroContext({
+            generationType: type,
+            promptInputs: agentPromptInputs,
+            worldInfoActivation,
+            currentModelConnection,
+        }, context, buildAgentReadOnlyMacros(context, characterFields, characterExamples)));
+    }
 
     if (dryRun) {
         return Promise.resolve();
@@ -6850,7 +6622,8 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
         frozenRunInputSnapshot,
         jsonSchema,
     });
-    let promptSnapshot;
+    let payload;
+    let snapshotMetadata;
     let generationIntent;
     let runFrozenRunInputSnapshot = frozenRunInputSnapshot;
 
@@ -6869,13 +6642,17 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
             model,
             type,
             structuredClone(messages),
-            { jsonSchema, agentMode: true },
+            {
+                jsonSchema, agentMode: true,
+                macroContext: createChatCompletionMacroContext(
+                    createMacroContextFromSnapshot(frozenRunInputSnapshot), settings, model),
+            },
         );
 
         assertAgentPromptSnapshotHasNoExternalTools(chatCompletionPayload);
-        promptSnapshot = {
+        payload = chatCompletionPayload;
+        snapshotMetadata = {
             contextPolicy: agentContextPolicy,
-            chatCompletionPayload,
             ...(frozenRunInputSnapshot.worldInfoActivation ? { worldInfoActivation: frozenRunInputSnapshot.worldInfoActivation } : {}),
         };
         generationIntent = {
@@ -6886,22 +6663,24 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
             contextPolicy: agentContextPolicy,
         };
     } else if (promptAssembly?.mode === 'frontendPromptAssembly') {
-        const agentApi = requireAgentPromptAssemblyApi();
-        const assembled = await agentApi.buildSnapshot(promptAssembly.request);
-        promptSnapshot = assembled.promptSnapshot;
+        const assembled = await buildPromptAssemblyPayload(promptAssembly.request);
+        payload = assembled.payload;
+        snapshotMetadata = assembled.snapshotMetadata;
         runFrozenRunInputSnapshot = assembled.frozenRunInputSnapshot ?? frozenRunInputSnapshot;
         generationIntent = {
             ...assembled.generationIntent,
             source: 'frontend-prompt-assembly-broker',
             parentSource: 'legacy-generate-live-handoff',
-            contextPolicy: assembled.promptSnapshot.contextPolicy,
+            contextPolicy: snapshotMetadata.contextPolicy,
             promptAssembly: promptAssembly.assembly,
         };
     } else {
         throw new Error('agent.prompt_assembly_mode_invalid: prepare_agent_prompt_assembly returned an unsupported mode');
     }
 
-    await eventSource.emit(event_types.CHAT_COMPLETION_SETTINGS_READY, promptSnapshot.chatCompletionPayload);
+    // Extensions finish editing the provider payload before it becomes canonical Agent input.
+    await eventSource.emit(event_types.CHAT_COMPLETION_SETTINGS_READY, payload);
+    const promptSnapshot = createAgentPromptSnapshot(payload, snapshotMetadata);
 
     return startAndWaitForAgentRun({
         generationType: type,
@@ -6989,7 +6768,7 @@ async function prepareAgentPromptAssemblyForRun(input) {
 
 function requireAgentPromptAssemblyApi() {
     const promptAssemblyApi = window.__TAURITAVERN__?.api?.agent?.promptAssembly;
-    if (!promptAssemblyApi || typeof promptAssemblyApi.prepare !== 'function' || typeof promptAssemblyApi.buildSnapshot !== 'function') {
+    if (!promptAssemblyApi || typeof promptAssemblyApi.prepare !== 'function') {
         throw new Error('agent.prompt_assembly_api_unavailable: TauriTavern Agent prompt assembly API is unavailable');
     }
     return promptAssemblyApi;
@@ -8660,6 +8439,7 @@ export function activateSendButtons() {
     showSwipeButtons();
     delete document.body.dataset.generating;
     delete document.body.dataset.agentGuidanceReady;
+    syncChatInputState();
 }
 
 /**
@@ -8669,6 +8449,7 @@ export function deactivateSendButtons() {
     showStopButton();
     hideSwipeButtons();
     document.body.dataset.generating = 'true';
+    syncChatInputState();
 }
 
 export function resetChatState() {
@@ -9282,18 +9063,11 @@ export async function getChat({ allowNewChat = false } = {}) {
             return;
         }
 
-        if (data.length > 0) {
-            /** @type {ChatHeader} */
-            const chatHeader = data.shift();
-            chat_metadata = chatHeader?.chat_metadata ?? {};
-            replaceChatContents(data);
-            chat.forEach(ensureMessageMediaIsArray);
-        } else if (allowNewChat) {
-            replaceChatContents(data);
-            chat_metadata = {};
-        } else {
-            throw new Error('Chat payload is empty');
-        }
+        /** @type {ChatHeader} */
+        const chatHeader = data.shift();
+        chat_metadata = chatHeader?.chat_metadata ?? {};
+        replaceChatContents(data);
+        chat.forEach(ensureMessageMediaIsArray);
 
         if (!chat_metadata.integrity) {
             chat_metadata.integrity = uuidv4();
@@ -9609,11 +9383,8 @@ async function applySettingsSnapshot(data, initLoaderHandle = null) {
         await eventSource.emit(event_types.SETTINGS_LOADED_AFTER, settings);
 
         // Set context size after loading power user (may override the max value)
-        $('#max_context').val(max_context);
-        $('#max_context_counter').val(max_context);
-
-        $('#amount_gen').val(amount_gen);
-        $('#amount_gen_counter').val(amount_gen);
+        $('#max_context').val(max_context).trigger('input');
+        $('#amount_gen').val(amount_gen).trigger('input');
 
         //Load which API we are using
         if (settings.main_api == undefined) {
@@ -9822,13 +9593,13 @@ export function setGenerationParamsFromPreset(preset) {
     if (preset.genamt !== undefined) {
         amount_gen = preset.genamt;
         $('#amount_gen').val(amount_gen);
-        $('#amount_gen_counter').val(amount_gen);
+        $('#amount_gen_counter').val(amount_gen).trigger('input');
     }
 
     if (preset.max_length !== undefined) {
         max_context = preset.max_length;
         $('#max_context').val(max_context);
-        $('#max_context_counter').val(max_context);
+        $('#max_context_counter').val(max_context).trigger('input');
     }
 }
 
@@ -9908,6 +9679,8 @@ function openMessageDelete(fromSlashCommand) {
         $('#dialogue_del_mes').css('display', 'block');
         $('#send_form').css('display', 'none');
         syncMountedDeleteState(chatSurface.getMountedMessageIds());
+        const target = chatElement[0].querySelector('.del_checkbox') ?? document.getElementById('dialogue_del_mes_cancel');
+        target.focus({ preventScroll: true });
     } else {
         console.debug(`
             ERR -- could not enter del mode
@@ -9915,6 +9688,21 @@ function openMessageDelete(fromSlashCommand) {
             is_send_press: ${is_send_press}
             selected_group: ${selected_group}
             is_group_generating: ${is_group_generating}`);
+    }
+}
+
+function setMessageActionsExpanded(message, expanded) {
+    const actions = message.querySelector('.extraMesButtons');
+    const trigger = message.querySelector('.extraMesButtonsHint');
+    actions.classList.toggle('visible', expanded);
+    trigger.setAttribute('aria-expanded', String(expanded));
+    if (!expanded && actions.contains(document.activeElement)) trigger.focus({ preventScroll: true });
+}
+
+function restoreMessageEditFocus(element, ownedFocus) {
+    if (ownedFocus && element.isConnected
+        && (document.activeElement === document.body || element.contains(document.activeElement))) {
+        element.querySelector('.mes_edit').focus({ preventScroll: true });
     }
 }
 
@@ -9984,6 +9772,9 @@ export async function messageEdit(editMessageId) {
     if (!(editTextArea instanceof HTMLTextAreaElement)) {
         throw new Error(`messageEdit: edit textarea missing for message ${editMessageId}`);
     }
+    editTextArea.setAttribute('aria-label', t`Edit Message`);
+    editTextArea.dataset.i18n = '[aria-label]Edit Message';
+    editTextArea.setAttribute('aria-describedby', messageElement[0].getAttribute('aria-labelledby'));
 
     const text = trimSpaces(editMessage.mes || '');
     const $editTextArea = $(editTextArea);
@@ -10022,6 +9813,7 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
     }
 
     const thisMesBlock = thisMesDiv.find('.mes_block');
+    const ownedFocus = thisMesDiv[0].contains(document.activeElement);
     thisMesDiv.find('.mes_edit_buttons').css('display', 'none');
     thisMesBlock.find('.mes_buttons').css('display', '');
 
@@ -10045,6 +9837,7 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
     }
 
     showSwipeButtons();
+    restoreMessageEditFocus(thisMesDiv[0], ownedFocus);
 }
 
 /**
@@ -10144,6 +9937,8 @@ async function messageEditDone(div) {
         return;
     }
 
+    const element = div.closest('.mes')[0];
+    const ownedFocus = element.contains(document.activeElement);
     const { mesBlock, bias } = updateMessage(div);
 
     await eventSource.emit(event_types.MESSAGE_EDITED, this_edit_mes_id);
@@ -10167,8 +9962,12 @@ async function messageEditDone(div) {
     await finalizeMessageContent(this_edit_mes_id, event_types.MESSAGE_UPDATED);
     this_edit_mes_id = undefined;
     syncChatSurfaceProjectionHold();
-    await saveChatConditional();
-    showSwipeButtons();
+    try {
+        await saveChatConditional();
+    } finally {
+        showSwipeButtons();
+        restoreMessageEditFocus(element, ownedFocus);
+    }
 }
 
 /**
@@ -10861,6 +10660,7 @@ export async function updateSwipeCounter(mesId, { message = undefined, messageEl
     const swipePickerButton = messageElement.find('.mes_swipe_picker');
     const canOpenSwipePicker = canOpenSwipePickerForMessage(mesId);
     const canJumpToSwipe = canJumpToSwipeForMessage(mesId);
+    const swipeAction = canJumpToSwipe ? t`Click to jump to a swipe` : canOpenSwipePicker ? t`Click to view swipe history` : null;
 
     swipeCounter
         .text(swipeCounterText)
@@ -10868,7 +10668,9 @@ export async function updateSwipeCounter(mesId, { message = undefined, messageEl
         .toggleClass('swipe-picker-enabled', canOpenSwipePicker)
         .toggleClass(INTERACTABLE_CONTROL_CLASS, canOpenSwipePicker)
         .attr('role', canOpenSwipePicker ? 'button' : null)
-        .attr('title', canJumpToSwipe ? t`Click to jump to a swipe` : canOpenSwipePicker ? t`Click to view swipe history` : null);
+        .attr('aria-label', swipeAction)
+        .attr('aria-description', canOpenSwipePicker ? swipeCounterText : null)
+        .attr('title', swipeAction);
     swipePickerButton.toggle(canOpenSwipePicker);
 
     if (!canOpenSwipePicker) {
@@ -11402,8 +11204,10 @@ export function updateEditArrowClasses() {
 
     const messageId = Number(this_edit_mes_id);
     const mountedIds = new Set(chatSurface.getMountedMessageIds());
-    downButton.toggleClass('disabled', !mountedIds.has(messageId + 1));
-    upButton.toggleClass('disabled', !mountedIds.has(messageId - 1));
+    const downDisabled = !mountedIds.has(messageId + 1);
+    const upDisabled = !mountedIds.has(messageId - 1);
+    downButton.toggleClass('disabled', downDisabled).attr('aria-disabled', String(downDisabled));
+    upButton.toggleClass('disabled', upDisabled).attr('aria-disabled', String(upDisabled));
 }
 
 /**
@@ -13178,8 +12982,8 @@ function doDrawerOpenClick() {
     const targetDrawerID = $(this).attr('data-target');
     const drawer = $(`#${targetDrawerID}`);
     const drawerToggle = drawer.find('.drawer-toggle');
-    const drawerWasOpenAlready = drawerToggle.parent().find('.drawer-content').hasClass('openDrawer');
-    if (drawerWasOpenAlready || drawer.hasClass('resizing')) { return; }
+    const panel = getTopLevelDrawerPanel(drawerToggle.get(0));
+    if (!panel || isTopLevelDrawerOpen(panel) || drawer.hasClass('resizing')) { return; }
     doNavbarIconClick.call(drawerToggle);
 }
 
@@ -13189,41 +12993,32 @@ function doDrawerOpenClick() {
  * @returns {Promise<void>}
  */
 export async function doNavbarIconClick() {
-    const icon = $(this).find('.drawer-icon');
-    const drawer = $(this).parent().find('.drawer-content');
-    const drawerWasOpenAlready = $(this).parent().find('.drawer-content').hasClass('openDrawer');
-    const targetDrawerID = $(this).parent().find('.drawer-content').attr('id');
+    const panel = getTopLevelDrawerPanel($(this).get(0));
+    if (!panel) return;
+    const drawerWasOpenAlready = isTopLevelDrawerOpen(panel);
 
     if (!drawerWasOpenAlready) {
-        const $openDrawers = $('.openDrawer:not(.pinnedOpen)');
-        const $openIcons = $('.openIcon:not(.drawerPinnedOpen)');
-        for (const iconEl of $openIcons) {
-            $(iconEl).toggleClass('closedIcon openIcon');
-        }
-        for (const el of $openDrawers) {
-            $(el).toggleClass('closedDrawer openDrawer');
-        }
-        if ($openDrawers.length && animation_duration) {
+        const openDrawers = document.querySelectorAll('.drawer-content.openDrawer:not(.pinnedOpen)');
+        for (const openPanel of openDrawers) setTopLevelDrawerOpen(openPanel, false);
+        if (openDrawers.length && animation_duration) {
             await delay(animation_duration);
         }
-        icon.toggleClass('openIcon closedIcon');
-        drawer.toggleClass('openDrawer closedDrawer');
+        setTopLevelDrawerOpen(panel, true);
 
-        if (targetDrawerID === 'right-nav-panel') {
+        if (panel.id === 'right-nav-panel') {
             favsToHotswap();
             $('#rm_print_characters_block').trigger('scroll');
         }
 
         // Set the height of "autoSetHeight" textareas within the drawer to their scroll height
         if (!CSS.supports('field-sizing', 'content')) {
-            const textareas = $(this).closest('.drawer').find('.drawer-content textarea.autoSetHeight');
+            const textareas = panel.querySelectorAll('textarea.autoSetHeight');
             for (const textarea of textareas) {
                 await resetScrollHeight($(textarea));
             }
         }
-    } else if (drawerWasOpenAlready) {
-        icon.toggleClass('closedIcon openIcon');
-        drawer.toggleClass('closedDrawer openDrawer');
+    } else {
+        setTopLevelDrawerOpen(panel, false);
     }
 }
 
@@ -13345,9 +13140,9 @@ jQuery(async function () {
     $(document).on('click', '.api_loading', () => cancelStatusCheck('Canceled because connecting was manually canceled'));
 
     installChatInputFocusKeeper();
-    $('#send_textarea').on('input', syncAgentGuidanceComposerState);
-    subscribeAgentRunState(syncAgentGuidanceComposerState);
-    syncAgentGuidanceComposerState();
+    $('#send_textarea').on('input', syncChatInputState);
+    subscribeAgentRunState(syncChatInputState);
+    syncChatInputState();
 
     $('#swipes-checkbox').on('change', function () {
         swipes = !!$('#swipes-checkbox').prop('checked');
@@ -13376,13 +13171,8 @@ jQuery(async function () {
         $('#option_continue').trigger('click');
     });
 
-    const userInputGenerateMutex = new SimpleMutex(sendTextareaMessage);
     $('#send_but').on('click', async function () {
-        if (await maybeSubmitAgentGuidanceFromComposer()) {
-            return;
-        }
-
-        await userInputGenerateMutex.update();
+        await sendTextareaMessage();
     });
 
     //menu buttons setup
@@ -13509,12 +13299,11 @@ jQuery(async function () {
         }
 
         if (fromSlashCommand) {  // When called from `/delchat` command, don't re-open the history view.
-            $('#options').hide();  // Hide option popup menu.
+            closeOptionsMenu();
             await loaderHandle.hide();
         } else {  // Open the history view again after 2 seconds (delay to avoid edge cases for deleting last chat).
             setTimeout(async function () {
                 $('#option_select_chat').trigger('click');
-                $('#options').hide();  // Hide option popup menu.
                 await loaderHandle.hide();
             }, 2000);
         }
@@ -13706,7 +13495,6 @@ jQuery(async function () {
 
         await delay(250);
         $('#option_select_chat').trigger('click');
-        $('#options').hide();
     });
 
     $(document).on('click', '.exportChatButton, .exportRawChatButton', async function (e) {
@@ -13753,43 +13541,19 @@ jQuery(async function () {
     });
 
 
-    const button = $('#options_button');
-    const menu = $('#options');
-    let isOptionsMenuVisible = false;
-
-    function showMenu() {
-        showBookmarksButtons();
-        menu.fadeIn(animation_duration);
-        optionsPopper.update();
-        isOptionsMenuVisible = true;
-    }
-
-    function hideMenu() {
-        menu.fadeOut(animation_duration);
-        optionsPopper.update();
-        isOptionsMenuVisible = false;
-    }
-
-    function isMouseOverButtonOrMenu() {
-        return menu.is(':hover, :focus-within') || button.is(':hover, :focus');
-    }
-
-    button.on('click', function () {
-        if (isOptionsMenuVisible) {
-            hideMenu();
-        } else {
-            showMenu();
-        }
-    });
-    $(document).on('click', function () {
-        if (!isOptionsMenuVisible) return;
-        if (!isMouseOverButtonOrMenu()) { hideMenu(); }
+    const closeOptionsMenu = initPopupMenu(document.getElementById('options_button'), document.getElementById('options'), {
+        onOpen() {
+            showBookmarksButtons();
+            optionsPopper.update();
+        },
+        closesOnClick: target => Boolean(target.closest('#options a[id]')),
     });
 
     /* $('#set_chat_character_settings').on('click', setScenarioOverride); */
 
     ///////////// OPTIMIZED LISTENERS FOR LEFT SIDE OPTIONS POPUP MENU //////////////////////
     $('#options [id]').on('click', async function (event, customData) {
+        closeOptionsMenu();
         const fromSlashCommand = customData?.fromSlashCommand || false;
         var id = $(this).attr('id');
 
@@ -13905,7 +13669,6 @@ jQuery(async function () {
             }
             //}
         }
-        hideMenu();
     });
 
     $('#newChatFromManageScreenButton').on('click', async function () {
@@ -13923,10 +13686,13 @@ jQuery(async function () {
         is_delete_mode = false;
         syncMountedDeleteState(chatSurface.getMountedMessageIds());
         showSwipeButtons();
+        document.getElementById('options_button').focus({ preventScroll: true });
     });
 
     //confirms message deletion with the "ok" button
     $('#dialogue_del_mes_ok').on('click', async function () {
+        const ownedFocus = document.getElementById('dialogue_del_mes').contains(document.activeElement)
+            || document.activeElement.matches('.del_checkbox');
         $('#dialogue_del_mes').css('display', 'none');
         $('#send_form').css('display', css_send_form_display);
         const deleteFrom = this_del_mes;
@@ -13934,24 +13700,27 @@ jQuery(async function () {
         is_delete_mode = false;
         syncMountedDeleteState(chatSurface.getMountedMessageIds());
 
-        if (deleteFrom >= 0) {
-            const deletedMessages = chat.slice(deleteFrom);
-            for (let i = (chat.length - 1); i >= deleteFrom; i--) {
-                deleteItemizedPromptForMessage(i);
+        try {
+            if (deleteFrom >= 0) {
+                const deletedMessages = chat.slice(deleteFrom);
+                for (let i = (chat.length - 1); i >= deleteFrom; i--) {
+                    deleteItemizedPromptForMessage(i);
+                }
+                chat.length = deleteFrom;
+                reconcileMountedChatSurface();
+                chat_metadata.tainted = true;
+                const saved = saveChatConditional();
+                void cleanupDeletedMessageStates(deletedMessages, saved);
+                await saved;
+                setChatScrollTop(getChatScrollHeight());
+                await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
+            } else {
+                console.log('No message selected for deletion');
             }
-            chat.length = deleteFrom;
-            reconcileMountedChatSurface();
-            chat_metadata.tainted = true;
-            const saved = saveChatConditional();
-            void cleanupDeletedMessageStates(deletedMessages, saved);
-            await saved;
-            setChatScrollTop(getChatScrollHeight());
-            await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
-        } else {
-            console.log('No message selected for deletion');
+        } finally {
+            showSwipeButtons();
+            if (ownedFocus && document.activeElement === document.body) focusMessageOrInput(chat.length - 1);
         }
-
-        showSwipeButtons();
     });
 
     $('#main_api').on('change', async function () {
@@ -14022,15 +13791,16 @@ jQuery(async function () {
         setTimeout(function () { $('#shadow_select_chat_popup').css('display', 'none'); }, animation_duration);
     });
 
-    $(document).on('pointerup', '.mes_copy', async function () {
+    $(document).on('click', '.mes_copy', async function () {
         if (this_chid !== undefined || selected_group || name2 === neutralCharacterName) {
             try {
                 const messageId = $(this).closest('.mes').attr('mesid');
                 const text = chat[messageId].mes;
                 await copyText(text);
-                toastr.info('Copied!', '', { timeOut: 2000 });
+                toastr.info(t`Copied!`, '', { timeOut: 2000 });
             } catch (err) {
                 console.error('Failed to copy: ', err);
+                toastr.error(t`Failed to copy message`);
             }
         }
     });
@@ -14076,72 +13846,26 @@ jQuery(async function () {
         }
     });
 
-    $(document).on('click', '.extraMesButtonsHint', function (e) {
-        const $hint = $(e.target);
-        const $buttons = $hint.siblings('.extraMesButtons');
-
-        $hint.transition({
-            opacity: 0,
-            duration: animation_duration,
-            easing: animation_easing,
-            complete: function () {
-                $hint.hide();
-                $buttons
-                    .addClass('visible')
-                    .css({
-                        opacity: 0,
-                        display: 'flex',
-                    })
-                    .transition({
-                        opacity: 1,
-                        duration: animation_duration,
-                        easing: animation_easing,
-                    });
-            },
-        });
+    $(document).on('click', '.extraMesButtonsHint', function () {
+        const message = this.closest('.mes');
+        setMessageActionsExpanded(message, !message.querySelector('.extraMesButtons').classList.contains('visible'));
     });
 
-    $(document).on('click', function (e) {
-        // Expanded options don't need to be closed
-        if (power_user.expand_message_actions) {
-            return;
-        }
+    $(document).on('keydown', '.mes_buttons', function (event) {
+        if (event.key !== 'Escape' || event.isDefaultPrevented() || event.originalEvent?.isComposing
+            || event.keyCode === 229 || power_user.expand_message_actions) return;
+        const message = this.closest('.mes');
+        if (!message.querySelector('.extraMesButtons').classList.contains('visible')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setMessageActionsExpanded(message, false);
+    });
 
-        // Check if the click was outside the relevant elements
-        if (!$(e.target).closest('.extraMesButtons, .extraMesButtonsHint').length) {
-            const $visibleButtons = $('.extraMesButtons.visible');
-
-            if (!$visibleButtons.length) {
-                return;
-            }
-
-            const $hiddenHints = $('.extraMesButtonsHint:hidden');
-
-            // Transition out the .extraMesButtons first
-            $visibleButtons.transition({
-                opacity: 0,
-                duration: animation_duration,
-                easing: animation_easing,
-                complete: function () {
-                    // Hide the .extraMesButtons after the transition
-                    $(this)
-                        .hide()
-                        .removeClass('visible');
-
-                    // Transition the .extraMesButtonsHint back in
-                    $hiddenHints
-                        .show()
-                        .transition({
-                            opacity: 0.3,
-                            duration: animation_duration,
-                            easing: animation_easing,
-                            complete: function () {
-                                $(this).css('opacity', '');
-                            },
-                        });
-                },
-            });
-        }
+    $(document).on('click', function (event) {
+        if (power_user.expand_message_actions || $(event.target).closest('.extraMesButtons, .extraMesButtonsHint').length) return;
+        chatElement[0].querySelectorAll('.extraMesButtons.visible').forEach(actions => {
+            setMessageActionsExpanded(actions.closest('.mes'), false);
+        });
     });
 
     $(document).on('click', '.mes_edit_cancel', async function () {
@@ -14166,7 +13890,7 @@ jQuery(async function () {
     });
 
     $(document).on('click', '.mes_edit_copy', async function () {
-        const confirmation = await callGenericPopup(t`Create a copy of this message?`, POPUP_TYPE.CONFIRM);
+        const confirmation = await callGenericPopup(t`Create a copy of this message?`, POPUP_TYPE.CONFIRM, null, { label: t`Create a copy of this message?` });
         if (!confirmation) {
             return;
         }
@@ -14437,11 +14161,10 @@ jQuery(async function () {
         // This autocloses open drawers that are not pinned if a click happens inside the app which does not target them.
         const targetParentHasOpenDrawer = clickTarget.parents('.openDrawer').length;
         if (!clickTarget.hasClass('drawer-icon') && !clickTarget.hasClass('openDrawer')) {
-            const $openDrawers = $('.openDrawer').not('.pinnedOpen');
-            if ($openDrawers.length && targetParentHasOpenDrawer === 0) {
-                // Toggle icon and drawer classes
-                $('.openIcon').not('.drawerPinnedOpen').toggleClass('closedIcon openIcon');
-                $openDrawers.toggleClass('closedDrawer openDrawer');
+            if (targetParentHasOpenDrawer === 0) {
+                for (const panel of document.querySelectorAll('.drawer-content.openDrawer:not(.pinnedOpen)')) {
+                    setTopLevelDrawerOpen(panel, false);
+                }
             }
         }
     });
@@ -14456,7 +14179,6 @@ jQuery(async function () {
             console.debug('inline-drawer-toggle: .inline-drawer ancestor not found', this);
             return;
         }
-        const icon = drawer.find('>.inline-drawer-header .inline-drawer-icon');
         const drawerContent = drawer.find('>.inline-drawer-content');
         const drawerContentEl = drawerContent.get(0);
         if (!drawerContentEl || drawerContentEl.nodeType !== 1) {
@@ -14464,16 +14186,7 @@ jQuery(async function () {
             return;
         }
 
-        const open = !isInlineDrawerContentOpen(drawerContentEl);
-        icon.toggleClass('down', !open);
-        icon.toggleClass('up', open);
-        icon.toggleClass('fa-circle-chevron-down', !open);
-        icon.toggleClass('fa-circle-chevron-up', open);
-        drawerEl.dispatchEvent(new CustomEvent('inline-drawer-toggle', { bubbles: true, detail: { open } }));
-        const motion = setInlineDrawerContentOpen(drawerContentEl, open, { durationMs: animation_duration });
-        void motion.then(() => {
-            drawerEl.dispatchEvent(new CustomEvent('inline-drawer-motion-complete', { bubbles: true, detail: { open } }));
-        });
+        const open = toggleInlineDrawer(drawerEl, animation_duration);
 
         // Set the height of "autoSetHeight" textareas within the inline-drawer to their scroll height
         if (open && !CSS.supports('field-sizing', 'content')) {
@@ -14597,17 +14310,18 @@ jQuery(async function () {
     });
 
     $(document).on('keydown', function (e) {
-        if (e.key === 'Escape' && !e.originalEvent.isComposing) {
+        if (e.key === 'Escape' && !e.isDefaultPrevented() && !e.originalEvent?.isComposing
+            && e.keyCode !== 229 && !document.querySelector('dialog[open]')) {
             const isEditVisible = $('#curEditTextarea').is(':visible') || $('.reasoning_edit_textarea').length > 0;
             if (isEditVisible && power_user.auto_save_msg_edits === false) {
                 closeMessageEditor('all');
-                focusChatInput(ChatInputFocusIntent.EDITING);
+                e.preventDefault();
                 return;
             }
             if (isEditVisible && power_user.auto_save_msg_edits === true) {
                 chatElement.find(`.mes[mesid="${this_edit_mes_id}"] .mes_edit_done`).trigger('click');
                 closeMessageEditor('reasoning');
-                focusChatInput(ChatInputFocusIntent.EDITING);
+                e.preventDefault();
                 return;
             }
             if (this_edit_mes_id === undefined && $('#mes_stop').is(':visible')) {
@@ -14785,69 +14499,6 @@ jQuery(async function () {
             console.log('Page reloaded. Aborting streaming...');
             streamingProcessor.onStopStreaming();
         }
-    });
-
-    var isManualInput = false;
-    var valueBeforeManualInput;
-
-    $(document).on('input', '.range-block-counter input, .neo-range-input', function () {
-        valueBeforeManualInput = $(this).val();
-        console.log(valueBeforeManualInput);
-    });
-
-    $(document).on('change', '.range-block-counter input, .neo-range-input', function (e) {
-        if (!(e.target instanceof HTMLElement)) {
-            return;
-        }
-        e.target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-    });
-
-    $(document).on('keydown', '.range-block-counter input, .neo-range-input', function (e) {
-        const masterSelector = '#' + $(this).data('for');
-        const masterElement = $(masterSelector);
-        if (e.key === 'Enter') {
-            let manualInput = Number($(this).val());
-            if (isManualInput) {
-                //disallow manual inputs outside acceptable range
-                if (manualInput >= Number($(this).attr('min')) && manualInput <= Number($(this).attr('max'))) {
-                    //if value is ok, assign to slider and update handle text and position
-                    //newSlider.val(manualInput)
-                    //handleSlideEvent.call(newSlider, null, { value: parseFloat(manualInput) }, 'manual');
-                    valueBeforeManualInput = manualInput;
-                    $(masterElement).val($(this).val()).trigger('input', { forced: true });
-                } else {
-                    //if value not ok, warn and reset to last known valid value
-                    toastr.warning(`Invalid value. Must be between ${$(this).attr('min')} and ${$(this).attr('max')}`);
-                    //newSlider.val(valueBeforeManualInput)
-                    $(this).val(valueBeforeManualInput);
-                }
-            }
-        }
-    });
-
-    $(document).on('keyup', '.range-block-counter input, .neo-range-input', function () {
-        valueBeforeManualInput = $(this).val();
-        isManualInput = true;
-    });
-
-    //trigger slider changes when user clicks away
-    $(document).on('mouseup blur', '.range-block-counter input, .neo-range-input', function () {
-        const masterSelector = '#' + $(this).data('for');
-        const masterElement = $(masterSelector);
-        let manualInput = Number($(this).val());
-        if (isManualInput) {
-            //if value is between correct range for the slider
-            if (manualInput >= Number($(this).attr('min')) && manualInput <= Number($(this).attr('max'))) {
-                valueBeforeManualInput = manualInput;
-                //set the slider value to input value
-                $(masterElement).val($(this).val()).trigger('input', { forced: true });
-            } else {
-                //if value not ok, warn and reset to last known valid value
-                toastr.warning(`Invalid value. Must be between ${$(this).attr('min')} and ${$(this).attr('max')}`);
-                $(this).val(valueBeforeManualInput);
-            }
-        }
-        isManualInput = false;
     });
 
     $('.user_stats_button').on('click', function () {

@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use tt_domain::models::agent::profile::{
     AgentContextPolicy, AgentPresetRef, AgentProfileDefinition, AgentProfileSummary,
+    AgentReasoningEffort,
 };
 use tt_domain::models::agent::{
     AgentChatRef, AgentDelegationContinuation, AgentInvocationExitPolicy, AgentInvocationKind,
@@ -15,6 +16,102 @@ use tt_domain::models::tool::ToolId;
 use tt_ports::repositories::agent_profile_storage_health_repository::{
     AgentProfileStorageIssue, AgentProfileStorageRepairAction,
 };
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPrepareSessionRunDto {
+    pub session_id: String,
+    pub text: String,
+    pub profile: AgentProfileDefinition,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPrepareSessionRunResultDto {
+    pub expected_history_seq: u64,
+    #[serde(flatten)]
+    pub assembly: AgentPreparePromptAssemblyResultDto,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStartSessionRunDto {
+    pub session_id: String,
+    pub text: String,
+    pub profile: AgentProfileDefinition,
+    pub expected_history_seq: u64,
+    pub prompt_snapshot: Value,
+    pub frozen_run_input_snapshot: Value,
+    #[serde(default)]
+    pub generation_intent: Option<Value>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionRunHandleDto {
+    pub session_id: String,
+    pub run_id: String,
+    pub status: AgentRunStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum AgentCancelRunResultDto {
+    Chat(AgentRunHandleDto),
+    Session(AgentSessionRunHandleDto),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionProfileResultDto {
+    pub profile: Option<AgentProfileDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionResultDto {
+    pub session: tt_domain::models::agent::session::AgentSession,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentListSessionsResultDto {
+    pub sessions: Vec<tt_domain::models::agent::session::AgentSession>,
+    pub active_runs: Vec<AgentSessionRunHandleDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRenameSessionDto {
+    pub session_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDeleteSessionDto {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentReadSessionDto {
+    pub session_id: String,
+    pub before_seq: Option<u64>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentReadSessionResultDto {
+    pub session: tt_domain::models::agent::session::AgentSession,
+    pub messages: Vec<tt_domain::models::agent::session::AgentSessionMessage>,
+    pub last_seq: u64,
+    pub next_before_seq: Option<u64>,
+    pub active_run: Option<AgentSessionRunHandleDto>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +238,8 @@ pub struct AgentPromptAssemblyBrokerRequestDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     pub preset_ref: AgentPresetRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<AgentReasoningEffort>,
     pub agent_context_policy: AgentContextPolicy,
     pub agent_system_prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,6 +316,7 @@ pub struct AgentRetargetPresetRefsDto {
 pub struct AgentRetargetPresetRefsResultDto {
     pub updated: usize,
     pub profile_ids: Vec<String>,
+    pub session_profile_updated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -232,6 +332,12 @@ pub struct AgentListProfilesResultDto {
 pub struct AgentRepairProfileFileDto {
     pub profile_id: String,
     pub action: AgentProfileStorageRepairAction,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentListToolsDto {
+    pub context: Option<tt_domain::models::tool::AgentToolScope>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,6 +366,12 @@ pub struct AgentToolCatalogItemDto {
     pub server_display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<McpToolPermission>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contexts: Option<Vec<tt_domain::models::tool::AgentToolScope>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -385,10 +497,13 @@ pub enum AgentRunLiveToolCallDto {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentRunLiveReasoningDto {
+pub struct AgentRunLiveResponseDto {
+    pub round: usize,
+    pub attempt: usize,
     pub invocation_id: String,
     pub invocation_exit_policy: AgentInvocationExitPolicy,
     pub text: String,
+    pub reasoning: String,
     pub tool_ids: Vec<ToolId>,
 }
 
@@ -408,21 +523,22 @@ pub enum AgentRunLiveFieldDto {
     rename_all_fields = "camelCase"
 )]
 pub enum AgentRunLiveUpdateDto {
-    ReasoningReplace {
-        reasoning: AgentRunLiveReasoningDto,
+    ResponseReplace {
+        response: AgentRunLiveResponseDto,
     },
-    ReasoningAppend {
+    ResponseAppend {
         invocation_id: String,
         text: String,
+        reasoning: String,
         /// Newly observed tool IDs, appended independently of text.
         tool_ids: Vec<ToolId>,
     },
-    ReasoningRemove {
+    ResponseRemove {
         invocation_id: String,
     },
     Snapshot {
         calls: Vec<AgentRunLiveToolCallDto>,
-        reasoning: Vec<AgentRunLiveReasoningDto>,
+        responses: Vec<AgentRunLiveResponseDto>,
     },
     Append {
         invocation_id: String,

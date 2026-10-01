@@ -220,18 +220,20 @@ impl ChatService {
             .lock_run_lifecycle()
             .await;
 
-        let summary = self
+        let integrity = self
             .chat_repository
-            .get_character_chat_summary(character_name, file_name, true)
+            .get_character_chat_integrity(character_name, file_name)
             .await?;
-        let target = match summary.chat_metadata.as_ref() {
-            Some(metadata) => AgentWorkspaceLifecycleService::character_target_from_metadata(
-                character_name,
-                file_name,
-                metadata,
-            )?,
-            None => None,
-        };
+        let target = integrity
+            .as_deref()
+            .map(|integrity| {
+                AgentWorkspaceLifecycleService::character_target(
+                    character_name,
+                    file_name,
+                    integrity,
+                )
+            })
+            .transpose()?;
         if let Some(target) = target.as_ref() {
             self.agent_workspace_lifecycle_service
                 .ensure_chat_workspace_inactive(target)
@@ -462,6 +464,17 @@ impl ChatService {
         Ok(ChatSearchResultDto::from(summary))
     }
 
+    pub async fn get_character_chat_integrity(
+        &self,
+        character_name: &str,
+        file_name: &str,
+    ) -> Result<Option<String>, ApplicationError> {
+        Ok(self
+            .chat_repository
+            .get_character_chat_integrity(character_name, file_name)
+            .await?)
+    }
+
     pub async fn get_character_chat_metadata(
         &self,
         character_name: &str,
@@ -471,21 +484,6 @@ impl ChatService {
             .chat_repository
             .get_character_chat_metadata(character_name, file_name)
             .await?)
-    }
-
-    pub async fn set_character_chat_metadata_extension(
-        &self,
-        character_name: &str,
-        file_name: &str,
-        namespace: &str,
-        value: Value,
-    ) -> Result<(), ApplicationError> {
-        self.chat_repository
-            .set_character_chat_metadata_extension(character_name, file_name, namespace, value)
-            .await?;
-        self.note_current_committed(character_name, file_name, CurrentCommitReason::Mutation)
-            .await;
-        Ok(())
     }
 
     pub async fn get_character_chat_store_json(

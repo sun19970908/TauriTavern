@@ -10,8 +10,10 @@ import {
 } from '../../../scripts/tauritavern/agent/agent-system-prompt.js';
 import {
     buildSettingsWithCurrentModelConnectionSnapshot,
+    createMacroContextFromSnapshot,
     normalizeFrozenRunInputSnapshot,
 } from '../../../scripts/tauritavern/agent/frozen-run-input-snapshot.js';
+import { createAgentPromptSnapshot } from '../../../scripts/tauritavern/agent/agent-model-messages.js';
 
 const LEGACY_DRY_RUN_SOURCE = 'legacy-generate-dry-run';
 
@@ -97,6 +99,9 @@ export async function materializeCurrentPromptSnapshot(input) {
         {
             jsonSchema: seed.jsonSchema ?? null,
             agentMode: true,
+            macroContext: openai.createChatCompletionMacroContext(
+                createMacroContextFromSnapshot(frozenRunInputSnapshot), settings, model,
+            ),
         },
     );
 
@@ -104,11 +109,10 @@ export async function materializeCurrentPromptSnapshot(input) {
     assertNoExternalToolTurns(payload.messages);
 
     return {
-        promptSnapshot: {
+        promptSnapshot: createAgentPromptSnapshot(payload, {
             contextPolicy: seed.contextPolicy,
-            chatCompletionPayload: payload,
             ...(seed.worldInfoActivation ? { worldInfoActivation: seed.worldInfoActivation } : {}),
-        },
+        }),
         frozenRunInputSnapshot,
         generationIntent: {
             source: LEGACY_DRY_RUN_SOURCE,

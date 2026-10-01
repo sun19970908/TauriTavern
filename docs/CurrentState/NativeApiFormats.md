@@ -60,6 +60,8 @@ Connection Profiles（Connection Manager 扩展）：
 
 DeepSeek 的原生与 Custom/OpenCode 兼容请求共享后端适配，保留各来源的参数与提示词策略；适配在协议构建后、用户覆盖前执行。
 
+内建渠道的模型规则只用于构造请求，不再对构造出的 Claude payload 重复执行远端参数校验。Fable 5.1 的 JSON schema 使用 output_config.format，与 effort 和普通 tools 共存；其他 Claude 保留 schema tool。Custom 仍保留显式参数，最终是否接受由上游响应说明。
+
 ### 2.3 HTTP 调用 + Stream 处理（Rust repository）
 
 仓库层对 `ChatCompletionSource::Custom` 以 **endpoint_path** 再分流（`http_chat_completion_repository/mod.rs`）：
@@ -70,6 +72,8 @@ DeepSeek 的原生与 Custom/OpenCode 兼容请求共享后端适配，保留各
 - 其他 → Custom OpenAI-compatible（`/chat/completions`）
 
 > 备注：Claude 的 streaming 仍保持“Anthropic 事件流 JSON”语义；Responses/Interactions streaming 则统一归一化为 OpenAI `chat.completion.chunk`。
+
+JSON 响应中的明确 error（包括 HTTP 200）在共同读取处转为错误，Legacy 与 Agent 使用同一传播路径；流式前端只忽略非 JSON 帧，不吞掉已识别的 provider 错误。
 
 ---
 
@@ -88,7 +92,7 @@ DeepSeek 的原生与 Custom/OpenCode 兼容请求共享后端适配，保留各
 ### 3.2 明确的当前限制
 
 - **Custom OpenAI Responses 不再维护 call_id → response_id 内存缓存**。普通 Custom 请求和默认关闭增强模式的 Agent 请求依赖完整 transcript / native output replay；显式启用 Responses WebSocket 模式后，Agent 才通过 run-scoped `provider_state` 使用 `previous_response_id` 与 incremental input。
-- **Custom 的 model list / status check** 已按 `custom_api_format` 对齐传输协议：OpenAI-compatible / Responses 继续使用兼容 `/models`，Claude Messages 使用 Claude `/models`，Gemini generateContent / Interactions 均使用 Gemini `/models`。
+- **Custom 的 model list / status check** 已按 `custom_api_format` 对齐传输协议：OpenAI-compatible / Responses 继续使用兼容 `/models`，Claude Messages 使用 Claude `/models`，Gemini generateContent / Interactions 均使用 Gemini `/models`。Google 模型列表读取完整分页并保留模型 metadata，中途失败不返回部分列表。
 - **Claude streaming 不做 chunk 归一化**：前端需走 Anthropic events 分支解析（现状就是如此，优先复用既有 Claude 语义）。
 
 ---
@@ -99,8 +103,9 @@ DeepSeek 的原生与 Custom/OpenCode 兼容请求共享后端适配，保留各
 
 - 共享 Chat Completions builder 为流式请求设置 `stream_options.include_usage=true`；现有 additional body overrides 仍可覆盖或删除该字段。usage 尾包可以没有 choices，必须消费到正常结束。
 - Claude、Gemini、Responses 与 Interactions 的 normalizer 将缓存读取数保留为 `usage.prompt_tokens_details.cached_tokens`，缺失时不补零；Claude 的 `prompt_tokens` 包含缓存读取、缓存写入和未缓存输入。Responses/Interactions 的现有流式终包携带相同 usage。
+- 缓存命中率是可选统计。前端共用解析入口将缺失或不一致的计数视为未知（`null`），不展示该统计、不猜测数值，也不因此中断流式或非流式回复；后续有效 usage 照常更新。
 - 第一方 UI 的 Reasoning Effort `Auto` 表示不生成 `reasoning_effort`；其他显式值由 Custom payload 原样发送，不按模型名启用、校验或降级。上游不接受时沿现有错误链路返回，用户仍可通过 include/exclude body override 最终覆盖或删除该字段。
-- assistant tool call 的 `extra_content` 是 provider-owned opaque JSON；Legacy 与 Agent 都按原 tool call 位置保存，并在同 API/model 的后续工具请求中原样回放。
+- assistant tool call 的 `extra_content` 是 provider-owned opaque JSON，流式处理中按最新非 null 快照整体替换；Legacy 与 Agent 按原 tool call 位置保存，并在同 API/model 的后续工具请求中原样回放。
 - 前端不解析其中的 provider namespace 或 signature，不按模型名启用，也不生成缺失值。
 - Rust OpenAI-compatible payload builder 继续整体转发 `messages`，不增加 provider-specific validation；上游不接受该字段时，其错误按现有链路返回用户。
 - Legacy provider/model 切换只迁移 canonical tool call 语义，不携带旧 provider 的 `extra_content`；Agent invocation 的模型连接在 run 内冻结。

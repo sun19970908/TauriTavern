@@ -55,13 +55,9 @@ async function currentChatRunFilter(): Promise<{ chatRef: TauriTavernChatRef; st
     if (!plainObject(chatRef)) {
         throw new Error('agent.run_history_current_chat_invalid: current chat ref must be an object');
     }
-    const stableChatIdValue = await chat.current.handle().stableId();
-    if (typeof stableChatIdValue !== 'string') {
-        throw new Error('agent.run_history_current_chat_invalid: stableChatId must be a string');
-    }
-    const stableChatId = stableChatIdValue.trim();
-    if (!stableChatId) {
-        throw new Error('agent.run_history_current_chat_invalid: stableChatId is required');
+    const stableChatId = await chat.current.handle().stableId();
+    if (typeof stableChatId !== 'string' || stableChatId.length === 0) {
+        throw new Error('agent.run_history_current_chat_invalid: stableChatId must be a non-empty string');
     }
     return { chatRef, stableChatId };
 }
@@ -139,12 +135,12 @@ export function openAgentSystemPanel(): void {
         loadSettings,
         patchSettings,
         getProfilesApi: () => requireAgentApi().profiles,
-        listTools: async () => {
+        listTools: async (options) => {
             const api = requireAgentApi().tools;
             if (typeof api?.list !== 'function') {
                 throw new Error(tr('hostAgentToolApiUnavailable'));
             }
-            const result = await api.list();
+            const result = await api.list(options);
             return {
                 tools: result.tools,
                 diagnostics: Array.isArray(result.diagnostics) ? result.diagnostics : [],

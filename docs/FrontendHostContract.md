@@ -48,6 +48,10 @@
 
 ## 3. 全局 API（Public）
 
+`SillyTavern.getContext().macros` 提供宏注册与独立求值，接口和使用范围见[宏求值 API](API/Macros.md)。
+
+`SillyTavern.getContext().messageFormatter` 暴露上游 [MessageFormatter](../src/scripts/message-formatter.js) 单例。同步 hook 在 HTML 净化前运行，可重复执行；单个 hook 失败会报告并隔离。延后扩展初始化完成后，通过 ChatSurface 统一补刷已挂载内容。
+
 > 这些符号被第三方脚本/扩展/角色卡直接调用，变更需极度谨慎。
 
 ### 3.1 资源与缩略图（Public）
@@ -169,10 +173,10 @@
 - `openEntry()` 必须复用上游 World Info 模块自身的导航能力；宿主 ABI 层不得直接依赖 `#WorldInfo`、`#world_editor_select`、`[uid=\"...\"]` 等 DOM 细节。
 
 - `api.agent`：运行控制、历史、工作区详情与 Profile 管理，见 [Agent API](API/Agent.md)。
-  - 前端准备聊天输入，Rust 执行模型与工具循环；Agent Mode 关闭时沿用 Legacy Generate。
-  - Host API 解析稳定聊天身份，宿主提交桥复用聊天保存流程，持久版本发布后再关联到消息 metadata。分叉使用新身份并复制持久版本。
-  - 运行结束包含执行与宿主呈现的收尾；前端等待保存成功或明确失败后释放生成状态。续接保留原 Run 身份。
-  - Run 事件供历史与 Timeline 使用，实时参数预览供当前显示使用；它们与 SillyTavern 生成事件分别订阅。
+  - Chat 与 Session 共用 PromptManager、统一的 Agent snapshot 和 Rust 模型/工具循环；Run 事件与实时投影独立于 SillyTavern 生成事件。
+  - Chat 使用稳定聊天身份，宿主提交桥复用聊天保存流程；保存成功或明确失败后释放生成状态。续接保留 Run 身份，分叉创建新聊天身份并复制持久版本。
+  - Session 独立于当前角色聊天和写作生成状态，不发出 SillyTavern 聊天/生成事件；目录、共享配置与连续历史由后端管理。Agent Mode 只控制 Chat 的 Agent/Legacy 路由。
+  - 扩展工具通过 `tools.register/setEnabled/list` 注册、开关与查询，按 Chat/Session 筛选，共用 Agent 工具执行链路；用法见 [注册扩展工具](API/Agent.md#注册扩展工具)。
   - 运行控制属于 Public Contract；模型回合、任务详情、工具目录和 Timeline 关系是 Project Contract，由对应 API 提供展示 DTO。
 
 - `api.llmConnections`：管理 Profile 引用的模型连接，见 [LLM Connection API](API/LlmConnections.md)。Profile 通过连接 ID 和模型 ID 绑定；Model Target 是界面的配置来源。
@@ -231,7 +235,9 @@
 
 第一方聊天完整加载与保存直接调用内部 payload transport；兼容 `/api/chats/get`、`/api/chats/group/get`、`/api/chats/save`、`/api/chats/group/save` 仍可由扩展主动调用。第一方操作不再产生这些 Fetch 请求，不能依赖 monkeypatch Fetch 观察它们；公开保存入口及既有业务事件不变。兼容保存成功仍为 `200 { ok: true }`，明确的 integrity 冲突仍为 `400 { error: 'integrity' }`，其他提交或清理失败不得仅因文案包含 integrity 而返回该冲突响应。
 
-`saveMetadata()` / `getContext().saveMetadata()` 的持久化范围为 header 内的整个 `chat_metadata`，正文保持原字节，不再顺带保存消息。这是相对 SillyTavern 1.18.0 的明确语义变化；消息修改必须调用完整保存，不能依赖下一次 metadata 写入。metadata 的 debounce 保持 1000 ms，不取消待执行的完整保存；integrity 确认后仍强制完整保存，拒绝则 reload，普通失败不回退。该能力通过内部 transport 调用一个 metadata command，不新增兼容 HTTP route 或 Host ABI 别名。新群聊在首次问候事件前已有带 identity 的 header，事件写入不会被初始化覆盖。完整语义与成本见 `docs/CurrentState/ChatPayload.md` §3.1。
+聊天 get/save 遵循 [ChatPayload §1.1](CurrentState/ChatPayload.md#11-统一格式底线)；无记录 get 返回空数组。
+
+`saveMetadata()` / `getContext().saveMetadata()` 只替换 header 内的整个 `chat_metadata`，正文保持原字节。与 SillyTavern 1.18.0 不同，消息修改必须显式调用完整保存。metadata 的 debounce 保持 1000 ms，不取消待执行的完整保存；integrity 确认后强制完整保存，拒绝则 reload，普通失败不回退。新群聊的首次问候事件可以立即保存 metadata，后续初始化不得覆盖事件修改。职责与成本见 [ChatPayload §3.1](CurrentState/ChatPayload.md#31-metadata-保存)。
 
 启用[历史滑动按需加载](CurrentState/ChatPayload.md#21-历史滑动按需加载)时，`getContext().chat` 的历史候选槽位允许为 null；兼容 get、导出与保存文件保持完整。
 

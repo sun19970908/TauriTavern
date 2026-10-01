@@ -1,8 +1,8 @@
 use crate::services::agent_workspace_scope::{
     format_model_visible_workspace_roots, format_model_workspace_roots,
 };
-use tt_domain::models::agent::AgentModelTool;
 use tt_domain::models::agent::profile::ResolvedAgentProfile;
+use tt_domain::models::agent::{AgentInvocationExitPolicy, AgentModelTool};
 
 use super::constants::{
     AGENT_AWAIT_TOOL, AGENT_DELEGATE_TOOL, AGENT_HANDOFF_TOOL, TASK_RETURN_TOOL,
@@ -11,9 +11,55 @@ use super::constants::{
 pub fn materialize_agent_system_prompt(
     tools: &[AgentModelTool],
     profile: &ResolvedAgentProfile,
+    exit_policy: AgentInvocationExitPolicy,
 ) -> String {
     if let Some(prompt) = profile.instructions.agent_system_prompt.as_ref() {
         return prompt.clone();
+    }
+
+    if exit_policy == AgentInvocationExitPolicy::ReplyAllowed {
+        let mut lines = vec![
+            "Assist the user with their request. Use tools when needed and reply directly when finished."
+                .to_string(),
+        ];
+        if [
+            "workspace.list_files",
+            "workspace.read_file",
+            "workspace.search_files",
+            "workspace.write_file",
+            "workspace.apply_patch",
+            "workspace.shell",
+        ]
+        .iter()
+        .any(|name| has_tool(tools, name))
+        {
+            lines.extend([
+                format!(
+                    "Readable workspace directories: {}.",
+                    format_model_visible_workspace_roots(&profile.workspace.visible_roots),
+                ),
+                format!(
+                    "Writable workspace directories: {}.",
+                    format_model_workspace_roots(&profile.workspace.writable_roots),
+                ),
+                "Use work/ for lasting work and tmp/ for temporary files. Both persist across turns and restarts. Remove temporary files when no longer needed."
+                    .to_string(),
+            ]);
+        }
+        if has_tool(tools, "workspace.shell") {
+            lines.push("Shell /work and /tmp map to work/ and tmp/ in this workspace.".to_string());
+            if has_tool(tools, "workspace.read_file")
+                && (has_tool(tools, "workspace.write_file")
+                    || has_tool(tools, "workspace.apply_patch"))
+            {
+                lines.push(format!(
+                    "After editing with {}, use {} before replacing or patching the file with text tools.",
+                    model_alias(tools, "workspace.shell"),
+                    model_alias(tools, "workspace.read_file"),
+                ));
+            }
+        }
+        return lines.join("\n");
     }
 
     let mut lines = vec!["---".to_string(), "tools:".to_string()];
@@ -106,11 +152,13 @@ pub fn materialize_agent_system_prompt(
             ));
         }
     }
-    if has_tool(tools, "workspace.commit") {
+    if let Some(output) = &profile.output
+        && has_tool(tools, "workspace.commit")
+    {
         lines.push(format!(
             "- Use {} to publish Run workspace files into the current chat message. Without arguments, it will replace the current run's chat message with {}; mode append will append to the same message, creating it if this run has not committed yet.",
             model_alias(tools, "workspace.commit"),
-            profile.output.message_body_path
+            output.message_body_path
         ));
     }
 

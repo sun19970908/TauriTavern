@@ -623,6 +623,7 @@ mod tests {
                 mode: AgentPresetBindingMode::CurrentPromptSnapshot,
                 ref_: None,
                 required: false,
+                reasoning_effort: None,
             },
             model: AgentModelBinding {
                 mode: AgentModelBindingMode::CurrentPromptSnapshot,
@@ -646,7 +647,7 @@ mod tests {
                 tool_descriptions: BTreeMap::new(),
                 max_rounds: 1,
                 max_calls_per_run: 1,
-                mcp_result_inline_char_limit: 50_000,
+                external_result_inline_char_limit: 50_000,
                 max_calls_per_tool: BTreeMap::new(),
             },
             skills: AgentSkillPolicy {

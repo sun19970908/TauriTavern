@@ -13,8 +13,8 @@ use tt_domain::models::mcp::{McpRegistrationId, validate_native_tool_name};
 use tt_domain::models::tool::{ToolCatalog, ToolDescriptionOverride, ToolDescriptor, ToolId};
 
 use super::constants::{
-    AGENT_AWAIT_TOOL, AGENT_DELEGATE_TOOL, AGENT_HANDOFF_TOOL, TASK_RETURN_TOOL,
-    WORKSPACE_ROOT_UNIVERSE,
+    AGENT_AWAIT_TOOL, AGENT_DELEGATE_TOOL, AGENT_HANDOFF_TOOL, CHAT_WORKSPACE_ROOTS,
+    SESSION_WORKSPACE_ROOTS, TASK_RETURN_TOOL,
 };
 
 pub(super) fn validate_profile_header(
@@ -210,9 +210,9 @@ pub(super) fn validate_tool_policy(
             "agent.profile_max_calls_invalid: tools.maxCallsPerRun must be > 0".to_string(),
         ));
     }
-    if policy.mcp_result_inline_char_limit == 0 {
+    if policy.external_result_inline_char_limit == 0 {
         return Err(ApplicationError::ValidationError(
-            "agent.profile_mcp_result_inline_char_limit_invalid: tools.mcpResultInlineCharLimit must be > 0"
+            "agent.profile_external_result_inline_char_limit_invalid: tools.externalResultInlineCharLimit must be > 0"
                 .to_string(),
         ));
     }
@@ -235,11 +235,6 @@ pub(super) fn validate_tool_policy(
         ));
     }
 
-    if allow_set.is_empty() {
-        return Err(ApplicationError::ValidationError(
-            "agent.profile_tools_empty: tools.allow cannot be empty".to_string(),
-        ));
-    }
     for id in allow_set.iter().chain(deny_set.iter()) {
         validate_profile_tool_id(id, tool_catalog)?;
     }
@@ -247,13 +242,6 @@ pub(super) fn validate_tool_policy(
         .difference(&deny_set)
         .copied()
         .collect::<BTreeSet<_>>();
-    let output_writer = ToolId::builtin("workspace.write_file")?;
-    if !visible.contains(&output_writer) {
-        return Err(ApplicationError::ValidationError(
-            "agent.profile_output_writer_required: workspace.write_file must be visible so the Agent can create the required message body artifact"
-                .to_string(),
-        ));
-    }
     let mut tool_descriptions = std::collections::BTreeMap::new();
     for (raw_id, override_) in &policy.tool_descriptions {
         let id = ToolId::parse(raw_id.clone())?;
@@ -290,7 +278,7 @@ pub(super) fn validate_tool_policy(
         tool_descriptions,
         max_rounds: policy.max_rounds,
         max_calls_per_run: policy.max_calls_per_run,
-        mcp_result_inline_char_limit: policy.mcp_result_inline_char_limit,
+        external_result_inline_char_limit: policy.external_result_inline_char_limit,
         max_calls_per_tool,
     })
 }
@@ -310,6 +298,9 @@ fn validate_profile_tool_id(
         if tool_catalog.get(id).is_some() {
             return Ok(());
         }
+    } else if let Some(extension_id) = id.extension_id() {
+        ToolId::extension(extension_id, id.native_name())?;
+        return Ok(());
     } else if McpRegistrationId::from_provider_id(id.provider_id()).is_ok() {
         validate_native_tool_name(id.native_name())?;
         return Ok(());
@@ -411,7 +402,6 @@ pub(super) fn validate_delegation_policy(
 pub(super) fn validate_run_policy(
     run: &AgentRunPolicy,
     delegation: &AgentDelegationPolicy,
-    tools: &ResolvedAgentToolPolicy,
 ) -> Result<(), ApplicationError> {
     if run.model_retry.max_retries > 0 && run.model_retry.interval_ms == 0 {
         return Err(ApplicationError::ValidationError(
@@ -439,31 +429,10 @@ pub(super) fn validate_run_policy(
         return Ok(());
     }
 
-    if !tool_is_visible(tools, "workspace.finish") {
-        return Err(ApplicationError::ValidationError(
-            "agent.profile_finish_required: workspace.finish must be visible for direct runnable profiles"
-                .to_string(),
-        ));
-    }
-
-    if run.presentation == AgentRunPresentation::Foreground
-        && !tool_is_visible(tools, "workspace.commit")
-    {
-        return Err(ApplicationError::ValidationError(
-            "agent.profile_commit_required: foreground direct runnable profiles must expose workspace.commit"
-                .to_string(),
-        ));
-    }
-
     Ok(())
 }
 
 pub(super) fn validate_skill_policy(policy: &AgentSkillPolicy) -> Result<(), ApplicationError> {
-    if policy.visible.is_empty() {
-        return Err(ApplicationError::ValidationError(
-            "agent.profile_skill_visible_empty: skills.visible cannot be empty".to_string(),
-        ));
-    }
     for name in &policy.visible {
         if name == "*" {
             continue;
@@ -482,7 +451,11 @@ pub(super) fn validate_skill_policy(policy: &AgentSkillPolicy) -> Result<(), App
 pub(super) fn validate_workspace_policy(
     policy: &AgentWorkspacePolicy,
 ) -> Result<(), ApplicationError> {
-    let universe = WORKSPACE_ROOT_UNIVERSE.into_iter().collect::<BTreeSet<_>>();
+    let universe = CHAT_WORKSPACE_ROOTS
+        .iter()
+        .chain(SESSION_WORKSPACE_ROOTS)
+        .copied()
+        .collect::<BTreeSet<_>>();
     let visible = policy
         .visible_roots
         .iter()
@@ -494,12 +467,6 @@ pub(super) fn validate_workspace_policy(
         .map(|root| root.as_str())
         .collect::<BTreeSet<_>>();
 
-    if visible.is_empty() {
-        return Err(ApplicationError::ValidationError(
-            "agent.profile_workspace_visible_empty: workspace.visibleRoots cannot be empty"
-                .to_string(),
-        ));
-    }
     for root in visible.iter().chain(writable.iter()) {
         if !universe.contains(root) {
             return Err(ApplicationError::ValidationError(format!(
