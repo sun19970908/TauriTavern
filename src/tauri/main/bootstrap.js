@@ -186,6 +186,8 @@ function installSameOriginWindowPatches(interceptors, downloadBridge, { iframeCo
         downloadBridge.patchWindow(targetWindow);
     };
 
+    const isElementNode = (node) => Boolean(node) && node.nodeType === 1;
+
     const watchIframe = (iframeElement) => {
         if (!iframeElement || trackedIframes.has(iframeElement)) {
             return;
@@ -194,10 +196,16 @@ function installSameOriginWindowPatches(interceptors, downloadBridge, { iframeCo
         trackedIframes.add(iframeElement);
 
         const patchFromIframe = () => {
+            const frameName = iframeElement.title || iframeElement.name || iframeElement.src?.slice(-40) || '(inline)';
             try {
                 patchWindow(iframeElement.contentWindow);
-            } catch {
-                // Ignore cross-origin access failures.
+                // A frame can embed frames of its own (a status bar panel hosting its detail
+                // views): the main-document observer never sees those, so the watch restarts
+                // from inside every patched frame.
+                watchIframesWithin(iframeElement.contentDocument);
+                console.info('[bootstrap] frame patched:', frameName);
+            } catch (error) {
+                console.info('[bootstrap] frame NOT patchable:', frameName, String(error).slice(0, 80));
             }
             iframeContractBridge?.watchIframe?.(iframeElement);
         };
@@ -206,12 +214,15 @@ function installSameOriginWindowPatches(interceptors, downloadBridge, { iframeCo
         patchFromIframe();
     };
 
+    // NOTE: duck-typed on purpose. Nodes from a same-origin frame belong to another realm, so
+    // `instanceof Element` / `instanceof HTMLIFrameElement` against this realm's constructors
+    // silently fail for exactly the nodes this scan exists to find.
     const scanForIframes = (rootNode) => {
-        if (!(rootNode instanceof Element)) {
+        if (!isElementNode(rootNode)) {
             return;
         }
 
-        if (rootNode instanceof HTMLIFrameElement) {
+        if (rootNode.nodeName === 'IFRAME') {
             watchIframe(rootNode);
         }
 
@@ -220,16 +231,28 @@ function installSameOriginWindowPatches(interceptors, downloadBridge, { iframeCo
         }
     };
 
-    scanForIframes(document.documentElement);
+    const trackedFrameDocuments = new WeakSet();
 
-    const observer = new MutationObserver((records) => {
-        for (const record of records) {
-            for (const addedNode of record.addedNodes) {
-                scanForIframes(addedNode);
-            }
+    const watchIframesWithin = (targetDocument) => {
+        if (!targetDocument || !targetDocument.documentElement
+            || trackedFrameDocuments.has(targetDocument)) {
+            return;
         }
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+        trackedFrameDocuments.add(targetDocument);
+
+        scanForIframes(targetDocument.documentElement);
+        const observer = new MutationObserver((records) => {
+            for (const record of records) {
+                for (const addedNode of record.addedNodes) {
+                    scanForIframes(addedNode);
+                }
+            }
+        });
+        observer.observe(targetDocument.documentElement, { childList: true, subtree: true });
+    };
+
+    watchIframesWithin(document);
 
     if (typeof window.open === 'function') {
         const originalOpen = window.open.bind(window);
@@ -384,6 +407,7 @@ export function bootstrapTauriMain() {
             installDesktopFullscreenShortcut(targetWindow);
         }
     };
+    console.info('[bootstrap] diag isMobile=', isMobile, 'main-module=', !!document.__TAURITAVERN_MOBILE_IMAGE_LONG_PRESS_SAVE__, 'ua=', String(navigator.userAgent).slice(0, 70));
     installSameOriginWindowPatches(interceptors, downloadBridge, {
         iframeContractBridge: isMobile ? installMobileIframeViewportContractBridge() : null,
         runtimeCompat,
