@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use tt_domain::errors::DomainError;
-use tt_ports::repositories::chat_payload_commit_repository::{
-    ChatSwipeSource, RestoredChatPayload,
-};
+use tt_ports::repositories::chat_commit_repository::{ChatSwipeSource, RestoredChatPayload};
 use tt_ports::repositories::chat_repository::ChatByteReader;
 
 const COLD: &str = "tt_swipe_cold";
@@ -177,13 +175,11 @@ impl<R: Read> Records<R> {
             if normalized.is_empty() {
                 continue;
             }
-            let begin = normalized.as_ptr() as usize - buffer.as_ptr() as usize;
-            let len = normalized.len();
-            buffer.drain(..begin);
-            buffer.truncate(len);
+            buffer.truncate(normalized.end);
+            buffer.drain(..normalized.start);
             return Ok(Some(RecordSpan {
-                start: start + begin as u64,
-                end: start + (begin + len) as u64,
+                start: start + normalized.start as u64,
+                end: start + normalized.end as u64,
             }));
         }
     }

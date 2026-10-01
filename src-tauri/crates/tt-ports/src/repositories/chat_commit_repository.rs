@@ -1,6 +1,5 @@
 use super::chat_repository::ChatByteReader;
 use async_trait::async_trait;
-use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use tt_domain::errors::DomainError;
@@ -28,13 +27,26 @@ pub struct ColdSwipeCommitSource {
     pub source: Arc<dyn ChatSwipeSource>,
 }
 
+/// What the staged JSON changes. Transport and publication share one lifecycle.
+pub enum ChatCommitOperation {
+    /// Replace the complete JSONL, optionally restoring unloaded swipe content.
+    Payload {
+        force: bool,
+        cold_source: Option<ColdSwipeCommitSource>,
+    },
+    /// Replace `chat_metadata` on an existing file, retaining header fields and body bytes.
+    Metadata,
+    /// Set one namespace on the latest disk metadata; a staged JSON null deletes it.
+    MetadataExtension { namespace: String },
+}
+
 pub struct RestoredChatPayload {
     pub size: u64,
     pub sha256: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ChatPayloadTarget {
+pub enum ChatCommitTarget {
     Character {
         character_id: String,
         file_name: String,
@@ -45,39 +57,30 @@ pub enum ChatPayloadTarget {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChatPayloadCommitBegin {
+pub struct ChatCommitBegin {
     pub session_id: String,
     pub max_frame_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommittedChatPayload {
-    pub target: ChatPayloadTarget,
+pub struct ChatCommitResult {
+    pub target: ChatCommitTarget,
     pub accepted_size: u64,
     pub size: u64,
 }
 
 /// Atomically publishes full chat payloads or metadata-only updates.
 #[async_trait]
-pub trait ChatPayloadCommitRepository: Send + Sync {
+pub trait ChatCommitRepository: Send + Sync {
     async fn open_swipe_source(
         &self,
-        target: ChatPayloadTarget,
+        target: ChatCommitTarget,
     ) -> Result<Arc<dyn ChatSwipeSource>, DomainError>;
-    /// Replaces `chat_metadata` on an existing chat, preserving all body bytes.
-    /// The incoming integrity must match any identity already in the header.
-    async fn commit_metadata(
-        &self,
-        target: ChatPayloadTarget,
-        chat_metadata: Value,
-    ) -> Result<(), DomainError>;
-
     async fn begin(
         &self,
-        target: ChatPayloadTarget,
-        force: bool,
-        cold_source: Option<ColdSwipeCommitSource>,
-    ) -> Result<ChatPayloadCommitBegin, DomainError>;
+        target: ChatCommitTarget,
+        operation: ChatCommitOperation,
+    ) -> Result<ChatCommitBegin, DomainError>;
 
     async fn append(&self, session_id: &str, offset: u64, bytes: &[u8])
     -> Result<u64, DomainError>;
@@ -86,7 +89,7 @@ pub trait ChatPayloadCommitRepository: Send + Sync {
         &self,
         session_id: &str,
         expected_size: u64,
-    ) -> Result<CommittedChatPayload, DomainError>;
+    ) -> Result<ChatCommitResult, DomainError>;
 
     /// Aborting an absent or already-consumed session is a successful no-op.
     async fn abort(&self, session_id: &str) -> Result<(), DomainError>;
