@@ -94,12 +94,10 @@ import {
     pickNativeCharacterCardFiles,
 } from './scripts/tauri/character-card-picker.js';
 import {
-    captureSettingsSaveBaseline,
-    clearSettingsSaveBaseline,
-    isSettingsPatchConflictError,
-    prepareSettingsSavePayload,
-    trySaveSettingsDelta,
-} from './scripts/tauri/setting/settings-delta-save.js';
+    captureSettingsSaveState,
+    isSettingsConflictError,
+    saveSettingsSnapshot,
+} from './scripts/tauri/setting/settings-persistence.js';
 
 import { humanizedDateTime, favsToHotswap, getMessageTimeStamp, dragElement, isMobile, initRossMods, autoloadLastChat } from './scripts/RossAscends-mods.js';
 import { userStatsHandler, statMesProcess, initStats } from './scripts/stats.js';
@@ -406,7 +404,6 @@ import { MessageFormatter } from './scripts/message-formatter.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { createStartupStatusOverlay } from './scripts/tauri/startup/startup-status-overlay.js';
-import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 // API OBJECT FOR EXTERNAL WIRING
@@ -859,7 +856,6 @@ let settingsSavePending = false;
 let pendingSettingsLoopCounter = 0;
 let settingsSavePromise = null;
 let settingsSaveQueued = false;
-let settingsConflictRecovering = false;
 const scheduleSettingsSave = debounce((loopCounter = 0) => {
     settingsSavePending = false;
     return saveSettings(loopCounter);
@@ -1147,16 +1143,29 @@ export async function pingServer() {
     }
 }
 
-async function fetchBootstrapSnapshot() {
+async function fetchBootstrapMetadata() {
     const response = await fetch('/api/bootstrap', {
         method: 'POST',
         headers: getRequestHeaders({ omitContentType: true }),
     });
 
     if (!response.ok) {
-        throw new Error(`Bootstrap snapshot request failed with status ${response.status}`);
+        throw new Error(`Bootstrap metadata request failed with status ${response.status}`);
     }
 
+    return response.json();
+}
+
+async function fetchSettingsSnapshot() {
+    const response = await fetch('/api/settings/get', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({}),
+        cache: 'no-cache',
+    });
+    if (!response.ok) {
+        throw new Error(`Settings request failed with status ${response.status}`);
+    }
     return response.json();
 }
 
@@ -1210,26 +1219,29 @@ async function firstLoadInit() {
         }
         token = tokenData.token;
 
-        const bootstrapPromise = fetchBootstrapSnapshot();
+        const startupDataPromise = Promise.all([
+            fetchBootstrapMetadata(),
+            fetchSettingsSnapshot(),
+        ]);
 
         setStage('core', '启动中：加载核心数据…');
         const clientVersionPromise = getClientVersion();
         await initSecrets();
-        const bootstrapSnapshot = await bootstrapPromise;
-        if (bootstrapSnapshot?.ios_policy?.scope === 'ios') {
+        const [bootstrapMetadata, settingsSnapshot] = await startupDataPromise;
+        if (bootstrapMetadata?.ios_policy?.scope === 'ios') {
             if (!window.__TAURITAVERN__ || typeof window.__TAURITAVERN__ !== 'object') {
                 throw new Error('[TauriTavern][iOSPolicy] Host ABI is unavailable (window.__TAURITAVERN__).');
             }
-            window.__TAURITAVERN__.iosPolicy = bootstrapSnapshot.ios_policy;
+            window.__TAURITAVERN__.iosPolicy = bootstrapMetadata.ios_policy;
         } else if (window.__TAURITAVERN__ && typeof window.__TAURITAVERN__ === 'object') {
-            window.__TAURITAVERN__.iosPolicy = bootstrapSnapshot.ios_policy;
+            window.__TAURITAVERN__.iosPolicy = bootstrapMetadata.ios_policy;
         }
         applyIosPolicyUiProjection();
-        const extensionsEnabled = Boolean(bootstrapSnapshot.settings?.enable_extensions)
-            && bootstrapSnapshot.settings?.result != 'file not find'
-            && Boolean(bootstrapSnapshot.settings?.settings);
+        const extensionsEnabled = Boolean(settingsSnapshot?.enable_extensions)
+            && settingsSnapshot?.result != 'file not find'
+            && Boolean(settingsSnapshot?.settings);
         const extensionsDiscoveryPromise = extensionsEnabled ? startOfflineExtensionsDiscovery() : null;
-        primeSecretStateSnapshot(bootstrapSnapshot.secret_state);
+        primeSecretStateSnapshot(bootstrapMetadata.secret_state);
         await readSecretState();
         await clientVersionPromise;
         await initLocales();
@@ -1248,7 +1260,7 @@ async function firstLoadInit() {
         ToolManager.initToolSlashCommands();
         await initPresetManager();
         await initSystemMessages();
-        await applySettingsSnapshot(bootstrapSnapshot.settings);
+        await applySettingsSnapshot(settingsSnapshot);
         void prefetchBackgrounds();
         await checkOpenRouterAuth();
         syncMobileImmersiveFullscreenUi();
@@ -1257,13 +1269,13 @@ async function firstLoadInit() {
         initDynamicStyles();
         initTags();
         initBookmarks();
-        primeUserAvatarsSnapshot(bootstrapSnapshot.avatars);
+        primeUserAvatarsSnapshot(bootstrapMetadata.avatars);
         await getUserAvatars(true, user_avatar);
-        const appliedCharacters = await applyCharactersSnapshot(bootstrapSnapshot.characters);
+        const appliedCharacters = await applyCharactersSnapshot(bootstrapMetadata.characters);
         if (!appliedCharacters) {
             return;
         }
-        applyGroupsSnapshot(bootstrapSnapshot.groups);
+        applyGroupsSnapshot(bootstrapMetadata.groups);
         await printCharacters(true);
         await getBackgrounds();
         initBackgrounds();
@@ -1293,7 +1305,7 @@ async function firstLoadInit() {
         let deferThirdPartyExtensions = false;
         if (extensionsEnabled) {
             await extensionsDiscoveryPromise;
-            const enableAutoUpdate = Boolean(bootstrapSnapshot.settings?.enable_extensions_auto_update);
+            const enableAutoUpdate = Boolean(settingsSnapshot?.enable_extensions_auto_update);
             const isVersionChanged = settings.currentVersion !== currentVersion;
 
             const isAndroid = /android/i.test(navigator.userAgent || '');
@@ -5588,8 +5600,16 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         creatorNotes: creatorNotes,
         trigger: GENERATION_TYPE_TRIGGERS.includes(type) ? type : 'normal',
     };
-    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData);
-    setExtensionPrompt(inject_ids.QUIET_PROMPT, '', extension_prompt_types.IN_PROMPT, 0, true);
+    let worldInfo;
+    try {
+        worldInfo = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData);
+    } finally {
+        setExtensionPrompt(inject_ids.QUIET_PROMPT, '', extension_prompt_types.IN_PROMPT, 0, true);
+    }
+    const {
+        worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples,
+        worldInfoDepth, outletEntries, worldInfoActivation,
+    } = worldInfo;
     const includeActivatedWorldInfo = !agentMode || resolvedAgentContextPolicy.includeActivatedWorldInfo;
     const promptWorldInfoBefore = includeActivatedWorldInfo ? worldInfoBefore : '';
     const promptWorldInfoAfter = includeActivatedWorldInfo ? worldInfoAfter : '';
@@ -9432,7 +9452,7 @@ function reloadLoop() {
 async function applySettingsSnapshot(data, initLoaderHandle = null) {
     if (data.result != 'file not find' && data.settings) {
         settings = JSON.parse(data.settings);
-        captureSettingsSaveBaseline(settings, data.tauritavern_settings_revision);
+        captureSettingsSaveState(settings, data.tauritavern_settings_revision);
         if (settings.username !== undefined && settings.username !== '') {
             name1 = settings.username;
             $('#your_name').text(name1);
@@ -9440,7 +9460,6 @@ async function applySettingsSnapshot(data, initLoaderHandle = null) {
 
         accountStorage.init(settings?.accountStorage);
         await setUserControls(data.enable_accounts);
-        setRequestCompressionConfig(data.request_compression);
 
         // Allow subscribers to mutate settings
         await eventSource.emit(event_types.SETTINGS_LOADED_BEFORE, settings);
@@ -9560,20 +9579,11 @@ async function applySettingsSnapshot(data, initLoaderHandle = null) {
 //MARK: getSettings()
 ///////////////////////////////////////////
 export async function getSettings(initLoaderHandle = null) {
-    const response = await fetch('/api/settings/get', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({}),
-        cache: 'no-cache',
-    });
-
-    if (!response.ok) {
+    const data = await fetchSettingsSnapshot().catch(error => {
         reloadLoop();
         toastr.error(t`Settings could not be loaded after multiple attempts. Please try again later.`);
-        throw new Error('Error getting settings');
-    }
-
-    const data = await response.json();
+        throw error;
+    });
     await applySettingsSnapshot(data, initLoaderHandle);
 }
 
@@ -9647,55 +9657,18 @@ async function saveSettingsNow(loopCounter = 0) {
     };
 
     try {
-        const preparedPayload = prepareSettingsSavePayload(payload);
-        const headers = getRequestHeaders();
-        const deltaResult = await trySaveSettingsDelta(preparedPayload, headers);
-
-        if (!deltaResult.saved) {
-            const saveSettingsRequest = await compressRequest({
-                method: 'POST',
-                headers,
-                body: preparedPayload.body,
-                cache: 'no-cache',
-            });
-            const result = await fetch('/api/settings/save', saveSettingsRequest);
-
-            if (!result.ok) {
-                throw new Error(`Failed to save settings: ${result.statusText}`);
-            }
-        }
-
-        if (!deltaResult.saved) {
-            clearSettingsSaveBaseline();
-        }
+        const result = await saveSettingsSnapshot(payload, getRequestHeaders());
         settings = payload;
         await eventSource.emit(event_types.SETTINGS_UPDATED);
-        if (deltaResult.saved && deltaResult.personaErrors) {
-            for (const [id, message] of Object.entries(deltaResult.personaErrors)) {
+        if (result.personaErrors) {
+            for (const [id, message] of Object.entries(result.personaErrors)) {
                 toastr.error(`${id}: ${message}`, t`Persona could not be saved`);
             }
         }
         return true;
     } catch (error) {
         console.error('Error saving settings:', error);
-        if (isSettingsPatchConflictError(error)) {
-            // The on-disk settings advanced past our baseline (e.g. another save
-            // finished after a reload). Re-sync the baseline from the backend and
-            // retry once so a stale baseline can't wedge every future save.
-            if (!settingsConflictRecovering) {
-                settingsConflictRecovering = true;
-                try {
-                    await getSettings();
-                    const retried = await saveSettingsNow(loopCounter);
-                    if (retried) {
-                        return true;
-                    }
-                } catch {
-                    // fall through to the toast
-                } finally {
-                    settingsConflictRecovering = false;
-                }
-            }
+        if (isSettingsConflictError(error)) {
             toastr.error(t`Settings changed outside this page. Reload before saving again to prevent data loss.`, t`Settings could not be saved`);
         } else {
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Settings could not be saved`);

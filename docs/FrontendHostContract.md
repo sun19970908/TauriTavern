@@ -231,15 +231,17 @@
 
 ### 4.3 路由表（Public）
 
-路由定义集中在 `src/tauri/main/routes/*`，其路径本身属于 Public Contract（上游/插件会直接请求）。
+路由位于 `src/tauri/main/routes/*`；公共契约覆盖上游兼容及生态实际依赖的接口。
 
-第一方聊天完整加载与保存直接调用内部 payload transport；兼容 `/api/chats/get`、`/api/chats/group/get`、`/api/chats/save`、`/api/chats/group/save` 仍可由扩展主动调用。第一方操作不再产生这些 Fetch 请求，不能依赖 monkeypatch Fetch 观察它们；公开保存入口及既有业务事件不变。兼容保存成功仍为 `200 { ok: true }`，明确的 integrity 冲突仍为 `400 { error: 'integrity' }`，其他提交或清理失败不得仅因文案包含 integrity 而返回该冲突响应。
+第一方聊天读写直连内部 transport，不产生兼容路由的 Fetch 请求；外部观察应使用既有业务事件。`/api/chats/get`、`/api/chats/group/get`、`/api/chats/save`、`/api/chats/group/save` 仍供扩展调用。保存成功为 `200 { ok: true }`；integrity 冲突按错误码识别，返回 `400 { error: 'integrity' }`。
 
 聊天 get/save 遵循 [ChatPayload §1.1](CurrentState/ChatPayload.md#11-统一格式底线)；无记录 get 返回空数组。
 
-`saveMetadata()` / `getContext().saveMetadata()` 只替换 header 内的整个 `chat_metadata`，正文保持原字节。与 SillyTavern 1.18.0 不同，消息修改必须显式调用完整保存。metadata 的 debounce 保持 1000 ms，不取消待执行的完整保存；integrity 确认后强制完整保存，拒绝则 reload，普通失败不回退。新群聊的首次问候事件可以立即保存 metadata，后续初始化不得覆盖事件修改。职责与成本见 [ChatPayload §3.1](CurrentState/ChatPayload.md#31-metadata-保存)。
+`saveMetadata()` / `getContext().saveMetadata()` 只替换 `chat_metadata`，正文保持原字节；消息修改须调用完整保存。调度、初始化与错误处理见 [ChatPayload §3.1](CurrentState/ChatPayload.md#31-metadata-保存)。
 
 启用[历史滑动按需加载](CurrentState/ChatPayload.md#21-历史滑动按需加载)时，`getContext().chat` 的历史候选槽位允许为 null；兼容 get、导出与保存文件保持完整。
+
+世界书 get/edit 直接读写磁盘，保留未知字段和键顺序，不合并编辑缓存；get 缺失文件返回空 `entries`。`WORLDINFO_UPDATED` 仅在保存成功后发送；读取或保存失败阻止依赖该世界书的生成。
 
 最关键的启动依赖：
 
@@ -250,6 +252,8 @@
 
 - `/api/*`：应用核心 API（settings/chats/characters/ai/worldinfo…）
   - 用户设定沿用上游 settings 数据形状；列表刷新不写入资料，单项保存失败不影响其他修改。
+  - `/api/settings/save` 接收完整 JSON。读取与保存确认返回 `tauritavern_settings_revision`；调用方将其作为不透明令牌，以 JSON 编码经 `X-TauriTavern-Settings-Revision` 回传。过期令牌返回 409，未携带时仍可覆盖保存。Persona 修改独立确认成败。
+  - `/api/settings/get` 保持上游响应形状，`settings` 仍为 JSON 字符串；启动读取与应用顺序见 [StartupOptimization §4](CurrentState/StartupOptimization.md#4-设置与-bootstrap-元数据读取)。
 - `/api/backends/chat-completions/generate` 的流式响应由 Rust 进程内会话持有生成任务、移动端 best-effort 后台执行租约与未确认事件；前端通过单调递增的 `after_seq` 消费并确认，WebView 暂停后可在同一 Rust 进程内重放缺失事件。单次读取失败会使用相同 cursor 重试一次，第二次失败才关闭会话。后台租约失败或到期不拥有生成终止权；该保证不跨进程重启，也不伪装成上游 provider 的 HTTP 断点续传。
 - `/css/user.css`：用户自定义 CSS 覆盖文件（数据目录 `_css/user.css`）
 - `/scripts/extensions/third-party/*`：third-party 扩展静态资源端点（ESM/CSS/url()/字体/图片）
@@ -309,11 +313,7 @@ header 名也可从 `window.__TAURITAVERN__?.traceHeader` 获取（用于避免�
 
 ### 5.1 Perf HUD（Project，作为验收工具）
 
-- 开关：
-  - `localStorage.setItem('tt:perf','1')` 后 reload
-  - 或 URL 参数 `?ttPerf=1`
-- 全局对象：
-  - `window.__TAURITAVERN_PERF__`（见 `src/tauri/main/perf/perf-hud.js`）
+`window.__TAURITAVERN_PERF__` 是性能观测入口；启用与报告导出见 [FrontendGuide §10.1](FrontendGuide.md#101-轻量性能仪表perf-hud)。
 
 ### 5.2 移动端运行时兼容（Public in practice）
 

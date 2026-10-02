@@ -110,7 +110,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::user_commands::update_user,
         super::user_commands::delete_user,
         // Bootstrap commands
-        super::bootstrap_commands::get_bootstrap_snapshot,
+        super::bootstrap_commands::get_bootstrap_metadata,
         super::bootstrap_commands::backend_error_bridge_ready,
         super::bootstrap_commands::wait_for_backend_ready,
         // Settings commands
@@ -121,8 +121,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::runtime_paths_commands::get_runtime_paths,
         #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         super::runtime_paths_commands::set_data_root,
-        super::settings_commands::save_user_settings,
-        super::settings_commands::save_user_settings_patch,
+        super::settings_commands::begin_settings_commit,
+        super::settings_commands::append_settings_commit_chunk,
+        super::settings_commands::finish_settings_commit,
+        super::settings_commands::abort_settings_commit,
         super::settings_commands::get_sillytavern_settings,
         super::settings_commands::create_settings_snapshot,
         super::settings_commands::get_settings_snapshots,
@@ -139,9 +141,11 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::dev_logging_commands::devlog_get_llm_api_log_raw,
         // World info commands
         super::world_info_commands::get_world_info,
-        super::world_info_commands::get_world_infos_batch,
         super::world_info_commands::normalize_world_info_name,
-        super::world_info_commands::save_world_info,
+        super::world_info_commands::begin_world_info_commit,
+        super::world_info_commands::append_world_info_commit_chunk,
+        super::world_info_commands::finish_world_info_commit,
+        super::world_info_commands::abort_world_info_commit,
         super::world_info_commands::delete_world_info,
         super::world_info_commands::import_world_info,
         // User directory commands

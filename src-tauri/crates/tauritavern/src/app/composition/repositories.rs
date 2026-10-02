@@ -154,12 +154,9 @@ pub(super) async fn build(
         chat_aliases.clone(),
         chat_backup_settings,
     ));
-    if let Err(error) = file_chat_repository
+    file_chat_repository
         .cleanup_orphaned_chat_commit_staging()
-        .await
-    {
-        tracing::warn!(%error, "Failed to clean orphaned chat commit staging");
-    }
+        .await;
     let character_repository: Arc<dyn CharacterRepository> =
         Arc::new(FileCharacterRepository::with_chat_repository(
             data_directory.characters().to_path_buf(),
@@ -191,10 +188,11 @@ pub(super) async fn build(
         default_user_dir.join("User Avatars"),
     ));
 
-    let settings_repository: Arc<dyn SettingsRepository> = Arc::new(FileSettingsRepository::new(
+    let settings_repository = Arc::new(FileSettingsRepository::new(
         data_directory.settings().to_path_buf(),
         default_user_settings,
     ));
+    settings_repository.cleanup_orphaned_commit_staging().await;
     // Materialize settings sections before background sync can scan the data directory.
     settings_repository.load_user_settings().await?;
     let persona_root = default_user_dir.clone();
@@ -332,9 +330,12 @@ pub(super) async fn build(
     let tts_repository: Arc<dyn TtsRepository> =
         Arc::new(HttpTtsRepository::new(http_client_pool.clone()));
 
-    let world_info_repository: Arc<dyn WorldInfoRepository> = Arc::new(
-        FileWorldInfoRepository::new(data_directory.default_user().join("worlds")),
-    );
+    let world_info_repository = Arc::new(FileWorldInfoRepository::new(
+        data_directory.default_user().join("worlds"),
+    ));
+    world_info_repository
+        .cleanup_orphaned_commit_staging()
+        .await;
 
     let update_repository: Arc<dyn UpdateRepository> =
         Arc::new(GitHubUpdateRepository::new(http_client_pool.clone()));
