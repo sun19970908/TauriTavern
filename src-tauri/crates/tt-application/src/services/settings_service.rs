@@ -422,19 +422,15 @@ impl SettingsService {
             .settings_repository
             .get_sillytavern_settings_signature()
             .await?;
-        let cache = self.sillytavern_settings_cache.lock().await;
+        let mut cache = self.sillytavern_settings_cache.lock().await;
         if let Some(entry) = cache.as_ref()
             && entry.signature == signature
         {
             tracing::debug!("Using cached SillyTavern settings aggregate");
             return Ok(entry.response.clone());
         }
-        // Drop the cache lock before building: build_sillytavern_settings_response
-        // takes the user-settings save lock, and save paths also take the cache lock
-        // (clear cache). Releasing here keeps the lock order save→cache everywhere
-        // and avoids a deadlock between a reader and an in-flight save.
-        drop(cache);
 
+        *cache = None;
         let response = self.build_sillytavern_settings_response().await?;
         let bytes = tokio::task::spawn_blocking(move || serde_json::to_vec(&response))
             .await
@@ -447,9 +443,7 @@ impl SettingsService {
         let response = SettingsJsonDto {
             bytes: bytes.into(),
         };
-        // Re-acquire the cache lock after building: the cache guard was dropped above
-        // to keep the lock order save→cache and avoid a deadlock.
-        *self.sillytavern_settings_cache.lock().await = Some(SettingsAggregateCacheEntry {
+        *cache = Some(SettingsAggregateCacheEntry {
             signature,
             response: response.clone(),
         });
@@ -461,10 +455,6 @@ impl SettingsService {
         &self,
     ) -> Result<SillyTavernSettingsResponseDto, ApplicationError> {
         let settings_json = async {
-            // Serialize settings reads with saves so the revision hash handed to
-            // the frontend always matches a committed on-disk state (a reload's
-            // bootstrap GET must not read mid-write and capture a stale hash).
-            let _settings_read_guard = self.user_settings_save_lock.lock().await;
             let mut user_settings = self.settings_repository.load_user_settings().await?;
             let revision = UserSettingsRevisionDto::from_settings(&user_settings)?;
             insert_personas(&mut user_settings.data, &self.avatars.get_personas().await?);
