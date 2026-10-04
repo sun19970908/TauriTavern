@@ -349,6 +349,17 @@ async function saveBlobWithAndroidPublicDownloadRuntime(blob, fileName, { fallba
     }
 }
 
+export function downloadImageFromUrlWithRuntime(url, fileName) {
+    const bridge = getAndroidPublicDownloadBridge();
+    if (typeof bridge?.downloadImageUrl !== 'function') {
+        throw new Error('Android public download bridge is unavailable');
+    }
+
+    // Only started: the system downloader writes the file itself, so the name may still change.
+    const result = parseAndroidPublicDownloadResult(bridge.downloadImageUrl(url, fileName));
+    return { mode: 'android-system-download', savedPath: String(result.saved_path || '').trim() };
+}
+
 async function shareBlobWithIosRuntime(blob, fileName, { fallbackName } = {}) {
     const invokeApi = getInvokeApi();
     const staged = await stageBlobForNativeFileBridge(blob, fileName, {

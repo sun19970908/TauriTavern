@@ -3306,6 +3306,7 @@
     "Exported to: ${0}": "已匯出到：${0}",
     "This will permanently delete the file. THIS CANNOT BE UNDONE!": "這將永久刪除該檔案。THIS CANNOT BE UNDONE！",
     "Export started. Check your default download folder.": "匯出已開始。請檢查您的預設下載資料夾。",
+    "Export started": "匯出開始",
     "Extension \"${0}\" did not load. Missing required Extras module(s): \"${1}\"": "擴充功能 \"${0}\" 無法載入。缺少所需的附加模組：\"${1}\"",
     "Extension \"${0}\" did not load. Required extensions exist but are disabled: \"${1}\". Enable them first, then reload.": "擴充功能 \"${0}\" 無法載入。所需的擴充功能存在但已被停用：\"${1}\"。請先啟用它們，然後重新載入。",
     "Extension \"${0}\" did not load. Missing required extensions: \"${1}\"": "擴充功能 \"${0}\" 無法載入。缺少必要的擴充功能：\"${1}\"",
