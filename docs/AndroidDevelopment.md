@@ -176,12 +176,12 @@ https://v2.tauri.app/develop/resources/#android
 - 浏览器中的“保存图片”菜单是 `contextmenu` 在 `<img>` 上的默认行为。Android WebView 没有实现这一项，只有默认关闭的 Chromium 开关 `kWebViewHyperlinkContextMenu` 会创建该菜单。
 - 这个菜单不能在原生层补。Chromium 会先把长按交给 WebView 的 `performLongClick()`；原生菜单只要有菜单项，就会消费这次长按，页面收不到 `contextmenu`，扩展调用 `preventDefault()` 也不再起作用。上游角色列表的长按批量编辑、智绘姬的长按编辑都依赖页面先收到这次长按。
 - 当前由前端 `download-bridge.js` 补上这一默认行为：主文档或同源 iframe 中的 `<img>` 收到 `contextmenu`，且事件没有被 `preventDefault()` 时，先弹出确认框，再按图片来源分流：`blob:`、`data:` 与同源 http(s) 在图片所在窗口读取原始字节，交给 `downloadBlobWithRuntime()`；跨域 http(s) 页内读不到，交给 `AndroidPublicDownloadJsBridge.downloadImageUrl()` 走系统 `DownloadManager`，字节不经过 WebView，并保留系统下载器自身的通知。保存位置、Android 版本分支与结果提示都与普通导出一致。
-- 跨域图片的系统下载器路径要求 Android 10+；不满足时直接提示失败，不改走其他路径。
+- 跨域图片的系统下载器路径在 Android 10+ 无需任何权限；Android 8-9 由 DownloadProvider 强制要求调用方持有 `WRITE_EXTERNAL_STORAGE`，因此首次长按会弹系统授权框并明确提示失败，授权后重试即可，不改走其他路径。
 
 维护原则：
 
 - 不要通过修改 `infrastructure/paths.rs` 或强行拼接 `/storage/emulated/0/Download` 来实现普通导出；
-- 不要给普通导出引入 `MANAGE_EXTERNAL_STORAGE` 或宽泛存储权限；
+- 不要给普通导出引入 `MANAGE_EXTERNAL_STORAGE` 或宽泛存储权限；唯一的例外是 `WRITE_EXTERNAL_STORAGE`，它只以 `maxSdkVersion="28"` 声明，且只服务 Android 8-9 上跨域图片的系统下载器路径；
 - 如需新增 Android 用户可见文件导出，优先复用 native public download bridge，而不是直接使用 Tauri `downloadDir()`；
 - 不要在 WebView 上注册 `OnCreateContextMenuListener` 或 `OnLongClickListener`，它们会先于页面处理长按；
 - 如果 Chromium 将来默认启用 WebView 自带的图片菜单，应删除前端补上的这一默认行为，避免同一次长按出现两个菜单。

@@ -17,6 +17,7 @@ class AndroidPublicDownloadJsBridge(
   private val exportStagingRoot: File,
   private val launchCreateDocumentPicker: (String, String) -> Unit,
   private val downloadManagerProvider: () -> DownloadManager,
+  private val ensurePublicDownloadPermission: () -> Boolean,
 ) {
   @JavascriptInterface
   fun supportsDirectPublicDownloads(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
@@ -113,8 +114,9 @@ class AndroidPublicDownloadJsBridge(
     url: String?,
     displayName: String?,
   ): String {
-    require(supportsDirectPublicDownloads()) {
-      "Direct public Downloads export requires Android 10 or newer"
+    // On Android 8-9 the download provider enforces the caller's storage permission.
+    require(supportsDirectPublicDownloads() || ensurePublicDownloadPermission()) {
+      "Public Downloads export needs the storage permission on Android 8 or 9"
     }
 
     val downloadUri = Uri.parse(requireNotNull(url).trim())
