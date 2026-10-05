@@ -46,7 +46,7 @@ python3 scripts/ohos/validate-hap.py --target "$TARGET_TRIPLE" \
 - [`prepare.py`](../scripts/ohos/prepare.py)：
   - 按 pin 获取插件 fork 与运行时源码，用路径依赖和 `[patch.crates-io]` 把 Tauri、Wry、Tao、Ability 和插件替换为 fork；
   - 追加 `napi-ohos`、`napi-derive-ohos`，因为 fork 的 `tauri::mobile_entry_point` 和 Ability 的 `#[ability]` 宏会在应用 crate 中展开 `napi_ohos::` 路径；
-  - 给 `mobile-barcode-scanner`、`system-file-picker` 两个 capability 的 `platforms` 加上 `openHarmony`，因为稳定版 schema 不认识这个平台；
+  - 给 `mobile-barcode-scanner` capability 的 `platforms` 加上 `openHarmony`，因为稳定版 schema 不认识这个平台；
   - 运行插件 fork 的 `install.py --sources-only`：从同一份 Ability 源码打包 HAR（`gen/ohos/vendor/ability.har`），并复制插件的 ArkTS 源码与类型声明。
 - [`env.sh`](../scripts/ohos/env.sh)：按 `TARGET_TRIPLE` 设置交叉编译器、linker 和 bindgen 参数。
 - `pnpm ohos`：先构建前端，再调用镜像里的 `cargo tauri`。npm 版 CLI 没有 ohos 子命令。
@@ -147,39 +147,34 @@ ArkWeb 的 `javaScriptOnDocumentStart` 按字典序执行多个脚本条目，�
 
 ## 7. 文件导入与导出
 
-原生选择器返回 `file://docs/...` URI。fs 插件和流读取可以使用它，但它不能当作 Rust 的文件路径。导出与归档需要宿主的文件交付机制，目前尚未实现，相关入口会明确报错，不会静默失败。
+鸿蒙是[文件传输](CurrentState/FileTransfer.md)的一个平台实现，与 Android 共用 URI 复制代码。鸿蒙特有的约束：dialog fork 只为面板返回的 URI 授权，授权保存在 Ability 的内存中，进程结束即失效。
 
-| 功能 | 鸿蒙现状 |
-| --- | --- |
-| `<input type="file">` 导入（角色卡、聊天、世界书、头像等） | 可用 |
-| 角色卡替换（原生选择器） | 可用：URI 经 `plugin:fs` 流读取 |
-| `download()` 类导出（角色卡、聊天、预设、世界书等） | 明确报错（`file-export.js`） |
-| 用户备份 | 明确报错（`user-routes.js`） |
-| 数据归档导入与导出 | 明确报错（`data-migration`） |
-| Skill 归档导入 | 明确报错；不显示目录导入 |
-| 调试包导出 | 明确报错（`dev_bundle.rs`） |
+## 8. 局域网同步
 
-## 8. 权限
+鸿蒙与 Android、Windows、Linux 共用 Rust mDNS 与本机地址实现，地址规则见[同步](CurrentState/Sync.md#lan-发现与信任)。鸿蒙特有的约束：普通应用不能绑定 `NETLINK_ROUTE` 套接字；本机地址经 libc `getifaddrs` 获取，鸿蒙 musl 的实现不绑定该套接字，接口查询受限时用 ioctl 补齐接口名和标志。鸿蒙没有公开的组播锁接口。
+
+## 9. 权限
 
 | 权限 | 用途 |
 | --- | --- |
-| `INTERNET` | 模型请求、扩展下载等网络访问 |
+| `INTERNET` | 模型请求、扩展下载、局域网同步等网络访问 |
 | `CAMERA` | 条码插件扫码（ScanKit，需要支持的 HarmonyOS 设备） |
 | `READ_PASTEBOARD` | 网页通过 `navigator.clipboard.readText` 主动读取剪贴板：`/clipboard-get`，以及 Quick Reply 的"从剪贴板添加"。复制和普通粘贴不依赖它。它属于受限权限（需要 ACL），ArkWeb 是否要求这个权限尚未实测 |
 
-## 9. 未覆盖
+## 10. 未覆盖
 
 - **后台生成：** 鸿蒙没有对应的后台执行保护（`generation_background` 返回空），应用退到后台后，生成可能被系统挂起。
-- **局域网同步：** 编译时走的是 Linux 路径（mdns-sd，用 netlink 获取本机地址），没有在设备上验证。
+- **局域网同步：** 已在 x86_64 模拟器验证；真机上的 Wi-Fi、热点、VPN 与跨设备互通尚未验证。
 - **系统通知、扫码、语音合成：** 尚未验证。
-- **导出类功能：** 见 §7。
 
-## 10. 设备验收清单
+## 11. 设备验收清单
 
 - ARM64 真机和 x86_64 模拟器都能进入主界面，`window.__TAURITAVERN_HOST__` 为 `{ platform: 'ohos', kind: 'mobile' }`。
 - localStorage 和 IndexedDB 在强制结束进程后仍保留。
 - 沙箱 iframe 无法通过任何一条 IPC 路径调用原生接口。
 - 新建聊天、发送、保存、强制结束后重新打开，内容完整；超过单帧预算的聊天提交与上传成功。
-- 能通过 `<input type="file">` 导入角色卡；导出入口明确报错。
+- 原生选择器导入、保存面板导出可用，取消不报错；`<input type="file">` 可用。
+- 同步面板（含 TT-Sync）可打开，接收服务能启动；与其他设备互相发现、配对并双向同步。
+- Wi-Fi 与移动数据同时在线时，配对链接使用 Wi-Fi 地址；组网地址出现在可用地址中，可通过手动地址配对与同步。
 - TT 设置页能打开；返回键逐层关闭弹窗和抽屉，最后退到后台。
 - 复制、粘贴与 `/clipboard-get` 正常；外链、全屏、媒体 Range、键盘和安全区表现正常。

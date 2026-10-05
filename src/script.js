@@ -14543,7 +14543,6 @@ jQuery(async function () {
                             try {
                                 const files = await pickNativeCharacterCardFiles({
                                     multiple: false,
-                                    title: t`Replace Character Card`,
                                 });
                                 await replaceCharacterFromFile(files?.[0]);
                             } catch (error) {
