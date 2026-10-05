@@ -1,13 +1,10 @@
 package com.tauritavern.client
 
-import android.Manifest
 import android.app.Activity
 import android.app.DownloadManager
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -17,7 +14,6 @@ import android.webkit.WebView
 import android.webkit.WebChromeClient
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.app.ActivityCompat
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ExecutorService
@@ -60,8 +56,6 @@ class MainActivity : TauriActivity(), AndroidWebFullscreenHost {
     registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
       handlePublicDownloadPickerResult(result.resultCode, result.data?.data)
     }
-  private val publicDownloadPermissionLauncher =
-    registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
   private val importArchiveJsBridge: AndroidImportArchiveJsBridge by lazy {
     AndroidImportArchiveJsBridge(
       contentResolver = contentResolver,
@@ -77,7 +71,6 @@ class MainActivity : TauriActivity(), AndroidWebFullscreenHost {
         launchPublicDownloadDocumentPicker(suggestedName, mimeType)
       },
       downloadManagerProvider = { getSystemService(DownloadManager::class.java) },
-      ensurePublicDownloadPermission = { ensurePublicDownloadPermission() },
     )
   }
 
@@ -285,26 +278,6 @@ class MainActivity : TauriActivity(), AndroidWebFullscreenHost {
         }
       publicDownloadPickerLauncher.launch(intent)
     }
-  }
-
-  // Android 8-9: the download provider enforces WRITE_EXTERNAL_STORAGE on the calling app.
-  private fun ensurePublicDownloadPermission(): Boolean {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      return true
-    }
-
-    if (ActivityCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
-      PackageManager.PERMISSION_GRANTED
-    ) {
-      return true
-    }
-
-    mainHandler.post {
-      if (!isActivityDestroyed) {
-        publicDownloadPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-      }
-    }
-    return false
   }
 
   private fun handleImportArchivePickerResult(uri: Uri?) {
