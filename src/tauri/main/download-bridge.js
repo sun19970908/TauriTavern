@@ -6,7 +6,6 @@ export function createDownloadBridge({
     notifyDownloadResult,
     notifyDownloadError,
     confirmImageDownload = null,
-    downloadImageFromUrl = null,
     fallbackName = 'download.bin',
 }) {
     const patchStateByWindow = new WeakMap();
@@ -105,16 +104,6 @@ export function createDownloadBridge({
         }
     }
 
-    function isCrossOriginNetworkSource(targetWindow, href) {
-        try {
-            const { protocol, origin } = new targetWindow.URL(href, targetWindow.location.href);
-            return (protocol === 'http:' || protocol === 'https:')
-                && origin !== targetWindow.location.origin;
-        } catch {
-            return false;
-        }
-    }
-
     function createDownloadRequest(targetWindow, anchorElement) {
         if (!anchorElement.hasAttribute('download')) {
             return null;
@@ -138,7 +127,11 @@ export function createDownloadBridge({
         };
     }
 
-    function announceDownload(result) {
+    async function exportBlob(blob, fileName) {
+        const result = await downloadBlobWithRuntime(blob, fileName, {
+            fallbackName,
+        });
+
         if (typeof notifyDownloadResult !== 'function') {
             return;
         }
@@ -148,14 +141,6 @@ export function createDownloadBridge({
         } catch (error) {
             console.warn('Failed to show download feedback:', error);
         }
-    }
-
-    async function exportBlob(blob, fileName) {
-        const result = await downloadBlobWithRuntime(blob, fileName, {
-            fallbackName,
-        });
-
-        announceDownload(result);
     }
 
     function notifyDownloadFailure(error) {
@@ -213,14 +198,6 @@ export function createDownloadBridge({
             if (!await confirmImageDownload(source)) {
                 return;
             }
-
-            // The page cannot read cross-origin bytes, but the host downloader fetches them itself.
-            if (downloadImageFromUrl && isCrossOriginNetworkSource(targetWindow, source.src)) {
-                const fileName = getImageDownloadFileName(source.src, '');
-                announceDownload(await downloadImageFromUrl(source.src, fileName));
-                return;
-            }
-
             const blob = await readDownloadBlob(targetWindow, source.src);
             await exportBlob(blob, getImageDownloadFileName(source.src, blob.type));
         } catch (error) {

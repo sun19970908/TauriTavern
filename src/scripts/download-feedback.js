@@ -40,7 +40,7 @@ export function showExportSuccessToast(
     result,
     {
         toastrInstance = globalThis.toastr,
-        title = result?.mode === 'android-system-download' ? t`Export started` : t`Export completed`,
+        title = t`Export completed`,
         timeOut = DEFAULT_EXPORT_SUCCESS_TIMEOUT,
     } = {},
 ) {

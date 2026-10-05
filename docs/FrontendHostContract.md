@@ -380,7 +380,7 @@ TauriTavern 第一方功能在所有平台直接使用同一个原生剪贴板�
 
 - Android WebView 没有图片上下文菜单。宿主在主文档与同源 iframe 中补上 `<img>` 的 `contextmenu` 默认行为：用户确认后，把当前显示的图片保存到公共 Downloads；Android 8–9 由用户选择保存位置。
 - 与浏览器一致，只有 `preventDefault()` 会取消这一默认行为，`stopPropagation()` 不影响。自行处理图片长按的扩展应在 `contextmenu` 上调用 `preventDefault()`。
-- 图片按来源分流保存：`blob:`、`data:` 与同源图片在其所在窗口按 `currentSrc` 读取原始字节；跨域 http(s) 图片页内读不到（CORS），交给宿主系统下载器直接拉取，字节不经过 WebView，要求 Android 10+ 且不满足时直接提示失败。两条路径都不重新编码，提示都是「导出到：/storage/emulated/0/Download」这一条 toast，只有标题区分「导出完成」与「导出开始」；跨域那条另有系统下载器自己的进度通知。
+- 图片在其所在窗口按 `currentSrc` 读取，遵循同源与 CORS 规则；读取失败直接提示，不改走其他路径。保存的是原始字节，不重新编码。
 - 宿主不注册原生长按菜单，长按产生的 `contextmenu` 始终先交给页面处理。
 
 ## 6. Smoke Tests（Public 回归用例）

@@ -1,6 +1,5 @@
 package com.tauritavern.client
 
-import android.app.DownloadManager
 import android.content.ContentResolver
 import android.content.ContentValues
 import android.net.Uri
@@ -16,7 +15,6 @@ class AndroidPublicDownloadJsBridge(
   private val contentResolver: ContentResolver,
   private val exportStagingRoot: File,
   private val launchCreateDocumentPicker: (String, String) -> Unit,
-  private val downloadManagerProvider: () -> DownloadManager,
 ) {
   @JavascriptInterface
   fun supportsDirectPublicDownloads(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
@@ -105,33 +103,6 @@ class AndroidPublicDownloadJsBridge(
         contentResolver.delete(uri, null, null)
       }
     }
-  }
-
-  // Cross-origin images cannot be read in the page, but the system downloader fetches them itself.
-  @JavascriptInterface
-  fun downloadImageUrl(
-    url: String?,
-    displayName: String?,
-  ): String {
-    require(supportsDirectPublicDownloads()) {
-      "Direct public Downloads export requires Android 10 or newer"
-    }
-
-    val downloadUri = Uri.parse(requireNotNull(url).trim())
-    val scheme = downloadUri.scheme?.lowercase(Locale.ROOT)
-    require(scheme == "http" || scheme == "https") { "Image download requires an http(s) URL" }
-
-    val normalizedName = normalizeDisplayName(displayName)
-    val request =
-      DownloadManager
-        .Request(downloadUri)
-        .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, normalizedName)
-    downloadManagerProvider().enqueue(request)
-
-    return JSONObject()
-      .apply {
-        put("saved_path", publicDownloadDisplayPath(normalizedName))
-      }.toString()
   }
 
   private fun resolveSourceFile(sourcePath: String?): File {

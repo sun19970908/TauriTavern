@@ -1,7 +1,6 @@
 package com.tauritavern.client
 
 import android.app.Activity
-import android.app.DownloadManager
 import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
@@ -70,7 +69,6 @@ class MainActivity : TauriActivity(), AndroidWebFullscreenHost {
       launchCreateDocumentPicker = { suggestedName, mimeType ->
         launchPublicDownloadDocumentPicker(suggestedName, mimeType)
       },
-      downloadManagerProvider = { getSystemService(DownloadManager::class.java) },
     )
   }
 

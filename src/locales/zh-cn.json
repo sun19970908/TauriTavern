@@ -2865,7 +2865,6 @@
     "This will permanently delete the file. THIS CANNOT BE UNDONE!": "这将永久删除该文件。THIS CANNOT BE UNDONE!",
     "Exported to: ${0}": "导出到：${0}",
     "Export started. Check your default download folder.": "导出已开始。请检查您的默认下载文件夹。",
-    "Export started": "导出开始",
     "Extension \"${0}\" did not load. Missing required Extras module(s): \"${1}\"": "扩展“${0}”未加载。缺少所需的 Extras 模块：\"${1}\"",
     "Extension \"${0}\" did not load. Required extensions exist but are disabled: \"${1}\". Enable them first, then reload.": "扩展“${0}”未加载。所需的扩展存在，但被禁用：\"${1}\"。请先启用它们，然后重新加载。",
     "This will permanently delete all files in this category. THIS CANNOT BE UNDONE!": "这将永久删除此类别中的所有文件。THIS CANNOT BE UNDONE！",
