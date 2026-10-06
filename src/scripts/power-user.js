@@ -1,5 +1,5 @@
 import { applyWindowBackdrop } from './window-backdrop.js';
-import { isWindowPortrait, subscribeWindowOrientation } from './util/window-layout.js';
+import { isWindowPortrait, subscribeWindowSnapshot } from './util/window-layout.js';
 import { isMobileHost } from './util/host-identity.js';
 import { Fuse, Handlebars } from '../lib.js';
 
@@ -196,7 +196,7 @@ export const power_user = {
 
     waifuMode: false,
     movingUI: false,
-    mobile_immersive_fullscreen: true,
+    mobile_immersive_fullscreen: false,
     movingUIState: {},
     movingUIPreset: '',
     noShadows: false,
@@ -1932,7 +1932,7 @@ export async function loadPowerUserSettings(settings, data) {
     }
 
     if (typeof power_user.mobile_immersive_fullscreen !== 'boolean') {
-        power_user.mobile_immersive_fullscreen = true;
+        power_user.mobile_immersive_fullscreen = false;
     }
 
     if (typeof power_user.chat_width !== 'number') {
@@ -3491,7 +3491,7 @@ jQuery(() => {
     var coreTruthWinWidth = window.innerWidth;
     var coreTruthWinHeight = window.innerHeight;
 
-    subscribeWindowOrientation(() => applyChatWidth('forced'));
+    subscribeWindowSnapshot(() => applyChatWidth('forced'));
 
     $(window).on('resize', async () => {
         const nextWidth = window.innerWidth;

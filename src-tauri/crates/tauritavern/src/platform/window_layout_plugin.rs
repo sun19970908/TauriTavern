@@ -1,7 +1,7 @@
-//! Android plugin transport for the native window owner.
+//! Plugin transport shared by Android and OpenHarmony window owners.
 use base64::Engine;
 use tauri::{AppHandle, Manager};
-use tt_adapter_media::window_backdrop::BackdropStrip;
+use tt_adapter_media::window_backdrop::{BackdropStrip, StripEdge};
 use tt_contracts::window_layout::{WindowBackdropRequest, WindowSnapshot};
 use tt_domain::errors::DomainError;
 
@@ -12,10 +12,12 @@ struct WindowLayoutPlugin<R: tauri::Runtime>(tauri::plugin::PluginHandle<R>);
 pub fn plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("window-layout")
         .setup(|app, api| {
-            app.manage(WindowLayoutPlugin(api.register_android_plugin(
-                "com.tauritavern.client",
-                "WindowLayoutPlugin",
-            )?));
+            #[cfg(target_os = "android")]
+            let handle =
+                api.register_android_plugin("com.tauritavern.client", "WindowLayoutPlugin")?;
+            #[cfg(target_env = "ohos")]
+            let handle = api.register_ohos_plugin()?;
+            app.manage(WindowLayoutPlugin(handle));
             Ok(())
         })
         .build()
@@ -66,7 +68,14 @@ pub(super) async fn apply_backdrop(
     let strips: Vec<_> = strips
         .into_iter()
         .map(|strip| {
+            let edge = match strip.edge {
+                StripEdge::Top => "top",
+                StripEdge::Bottom => "bottom",
+                StripEdge::Left => "left",
+                StripEdge::Right => "right",
+            };
             serde_json::json!({
+                "edge": edge, "average": strip.average,
                 "x": strip.x, "y": strip.y,
                 "png": base64::engine::general_purpose::STANDARD.encode(strip.png),
             })
