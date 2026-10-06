@@ -21,9 +21,15 @@
 
 排查灰带或双重缩小时，对照 WKWebView frame、`innerHeight`/`visualViewport` 与键盘边界：窗口与内容视口的差值应恰好等于安全区与停靠键盘。
 
+附属栏移除、下滑收键盘手势与拖动期间的高度保持见同一文档的 iOS 一节。排查收键盘卡顿时数 `innerHeight` 的变化次数：一次下滑收起只应有 1 次 resize；逐帧变化说明 WebView 高度在跟随 guide，WebKit 会逐帧整文档重建样式（`WebPage::viewportConfigurationChanged → updateSizeForCSSDefaultViewportUnits → Style::Scope::didChangeStyleSheetEnvironment`）。
+
 ### 1.1 UIScene 生命周期
 
 iOS 27 SDK 要求 UIScene 生命周期。Tao 0.35.3 只在 `UIApplicationSupportsMultipleScenes = true` 时启用它，因此 `gen/apple/project.yml` 与生成的 `Info.plist` 声明为 true。应用只有一个主窗口：系统额外请求的 scene 经 `RunEvent::SceneRequested` 交给 `platform::ios_ui::close_extra_scene()` 销毁。Tao 把 scene 生命周期与多窗口拆开后，改为 false 并删除这段处理。
+
+### 1.2 Xcode 27 开发构建
+
+锁定的 `swift-rs 1.0.8` 修正了 SwiftPM 交叉编译时混用 macOS/iOS SDK 的问题。尚未发布的 [Swift 运行时符号导出修复](https://github.com/Brendonovich/swift-rs/pull/79) 仍影响优化构建，所以 `src-tauri/Cargo.toml` 为 Tauri 和带 Swift 包的插件（opener、notification、dialog、clipboard-manager、barcode-scanner）的 dev profile 保留调试信息，让 `swift-rs` 以同一模式构建它们的 Swift 包；模式不一致时真机 `registerPlugin` 以 `swift_deletedMethodError` 中止，模拟器不会暴露。只影响开发构建；上游修复发布后删除这些覆盖。
 
 ## 2. 文件导入与导出
 
