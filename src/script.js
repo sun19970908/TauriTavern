@@ -47,7 +47,7 @@ import {
     saveCharacterChatMetadata,
 } from './scripts/chat-payload-transport.js';
 import { getActiveChatSnapshot } from './tauri/main/adapters/st/active-chat-ref.js';
-import { extension_prompt_roles, extension_prompt_types } from './scripts/extension-prompts.js';
+import { composeAuthorsNote, extension_prompt_roles, extension_prompt_types, isWorldInfoInjection } from './scripts/extension-prompts.js';
 import { waitForTauriMainReady } from './scripts/extensions/runtime/tauri-ready.js';
 import {
     ChatInputFocusIntent,
@@ -72,7 +72,7 @@ import {
     subscribeAgentRunState,
 } from './scripts/tauritavern/agent/agent-run-controller.js';
 import { agentErrorMessage } from './scripts/tauritavern/agent/agent-error-presenter.js';
-import { normalizeAgentContextPolicy } from './scripts/tauritavern/agent/agent-context-policy.js';
+import { normalizeAgentContextPolicy, projectAgentPromptInputs } from './scripts/tauritavern/agent/agent-context-policy.js';
 import { createAgentPromptSnapshot } from './scripts/tauritavern/agent/agent-model-messages.js';
 import { buildPromptAssemblyPayload } from './tauri/main/api/agent-prompt-assembly.js';
 import { normalizeAgentSystemPrompt } from './scripts/tauritavern/agent/agent-system-prompt.js';
@@ -208,6 +208,7 @@ import {
     openai_messages_count,
     chat_completion_sources,
     getChatCompletionModel,
+    getChatCompletionPreset,
     isVertexAiClaudeModelId,
     createGenerationParameters,
     createChatCompletionMacroContext,
@@ -317,7 +318,7 @@ import {
 import { checkOpenRouterAuth, initSecrets, primeSecretStateSnapshot, readSecretState, resolveSecretKey, secret_state } from './scripts/secrets.js';
 import { markdownExclusionExt } from './scripts/showdown-exclusion.js';
 import { markdownUnderscoreExt } from './scripts/showdown-underscore.js';
-import { NOTE_MODULE_NAME, initAuthorsNote, metadata_keys, setFloatingPrompt, shouldWIAddPrompt } from './scripts/authors-note.js';
+import { NOTE_MODULE_NAME, initAuthorsNote, setFloatingPrompt, shouldWIAddPrompt } from './scripts/authors-note.js';
 import { registerPromptManagerMigration } from './scripts/PromptManager.js';
 import { getRegexedString, getRegexedStringBatchAsync, regex_placement } from './scripts/extensions/regex/engine.js';
 import { initLogprobs, saveLogprobsForActiveMessage } from './scripts/logprobs.js';
@@ -3969,28 +3970,27 @@ function cleanGroupMessage(getMessage) {
     return getMessage;
 }
 
-function addPersonaDescriptionExtensionPrompt() {
+function preparePersonaDescriptionExtensionPrompt() {
     const INJECT_TAG = 'PERSONA_DESCRIPTION';
     setExtensionPrompt(INJECT_TAG, '', extension_prompt_types.IN_PROMPT, 0);
 
     if (!power_user.persona_description || power_user.persona_description_position === persona_description_positions.NONE) {
-        return;
+        return null;
     }
 
     const promptPositions = [persona_description_positions.BOTTOM_AN, persona_description_positions.TOP_AN];
-
+    let authorsNote = null;
     if (promptPositions.includes(power_user.persona_description_position) && shouldWIAddPrompt) {
-        const originalAN = extension_prompts[NOTE_MODULE_NAME].value;
-        const ANWithDesc = power_user.persona_description_position === persona_description_positions.TOP_AN
-            ? `${power_user.persona_description}\n${originalAN}`
-            : `${originalAN}\n${power_user.persona_description}`;
-
-        setExtensionPrompt(NOTE_MODULE_NAME, ANWithDesc, chat_metadata[metadata_keys.position], chat_metadata[metadata_keys.depth], extension_settings.note.allowWIScan, chat_metadata[metadata_keys.role]);
+        authorsNote = {
+            before: power_user.persona_description_position === persona_description_positions.TOP_AN ? power_user.persona_description : '',
+            after: power_user.persona_description_position === persona_description_positions.BOTTOM_AN ? power_user.persona_description : '',
+        };
     }
 
     if (power_user.persona_description_position === persona_description_positions.AT_DEPTH) {
         setExtensionPrompt(INJECT_TAG, power_user.persona_description, extension_prompt_types.IN_CHAT, power_user.persona_description_depth, true, power_user.persona_description_role);
     }
+    return authorsNote;
 }
 
 /**
@@ -5605,7 +5605,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     // Set non-WI AN
     setFloatingPrompt();
 
-    // Add WI to prompt (and also inject WI to AN value via hijack)
+    // Add WI to prompt
     // Make quiet prompt available for WIAN
     setExtensionPrompt(inject_ids.QUIET_PROMPT, quiet_prompt || '', extension_prompt_types.IN_PROMPT, 0, true);
     const chatForWI = fullContextCoreChat.map(x => world_info_include_names ? `${x.name}: ${x.mes}` : x.mes).reverse();
@@ -5629,30 +5629,17 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples,
         worldInfoDepth, outletEntries, worldInfoActivation,
     } = worldInfo;
-    const includeActivatedWorldInfo = !agentMode || resolvedAgentContextPolicy.includeActivatedWorldInfo;
-    const promptWorldInfoBefore = includeActivatedWorldInfo ? worldInfoBefore : '';
-    const promptWorldInfoAfter = includeActivatedWorldInfo ? worldInfoAfter : '';
-
-    // Add message example WI
-    if (includeActivatedWorldInfo) {
-        for (const example of worldInfoExamples) {
-            const exampleMessage = example.content;
-
-            if (exampleMessage.length === 0) {
-                continue;
-            }
-
-            const formattedExample = baseChatReplace(exampleMessage);
-            const cleanedExample = parseMesExamples(formattedExample, isInstruct);
-
-            // Insert depending on before or after position
-            if (example.position === wi_anchor_position.before) {
-                mesExamplesArray.unshift(...cleanedExample);
-            } else {
-                mesExamplesArray.push(...cleanedExample);
-            }
+    let exampleBlocks = { before: [], character: mesExamplesArray, after: [] };
+    for (const example of worldInfoExamples) {
+        if (example.content.length === 0) continue;
+        const cleanedExample = parseMesExamples(baseChatReplace(example.content), isInstruct);
+        if (example.position === wi_anchor_position.before) {
+            exampleBlocks.before.unshift(...cleanedExample);
+        } else {
+            exampleBlocks.after.push(...cleanedExample);
         }
     }
+    mesExamplesArray = [...exampleBlocks.before, ...exampleBlocks.character, ...exampleBlocks.after];
 
     // At this point, the raw message examples can be created
     const mesExamplesRawArray = [...mesExamplesArray];
@@ -5661,7 +5648,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         mesExamplesArray = formatInstructModeExamples(mesExamplesArray, name1, name2);
     }
 
-    if (includeActivatedWorldInfo && skipWIAN !== true) {
+    if (skipWIAN !== true) {
         console.log('skipWIAN not active, adding WIAN');
         // Add all depth WI entries to prompt
         flushWIInjections();
@@ -5677,14 +5664,26 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             });
         }
     } else {
-        if (agentMode && !includeActivatedWorldInfo) {
-            flushWIInjections();
-        }
-        console.log(agentMode && !includeActivatedWorldInfo ? 'skipping WIAN by Agent context policy' : 'skipping WIAN');
+        console.log('skipping WIAN');
     }
 
     // Add persona description to prompt
-    addPersonaDescriptionExtensionPrompt();
+    const personaAuthorsNote = preparePersonaDescriptionExtensionPrompt();
+    const worldInfoAuthorsNote = worldInfo.anBefore.length || worldInfo.anAfter.length
+        ? { before: worldInfo.anBefore.join('\n'), after: worldInfo.anAfter.join('\n') }
+        : null;
+    const authorsNote = extension_prompts[NOTE_MODULE_NAME];
+    const authorsNoteAdditions = shouldWIAddPrompt && (worldInfoAuthorsNote || personaAuthorsNote) ? {
+        position: authorsNote.position,
+        depth: authorsNote.depth,
+        role: authorsNote.role,
+        worldInfo: worldInfoAuthorsNote,
+        persona: personaAuthorsNote,
+    } : null;
+    if (!agentMode && authorsNoteAdditions) {
+        const note = composeAuthorsNote(authorsNote, authorsNoteAdditions);
+        setExtensionPrompt(NOTE_MODULE_NAME, note.value, note.position, note.depth, extension_settings.note.allowWIScan, note.role);
+    }
 
     // Prepare the system prompt for Text Completion APIs
     if (main_api !== 'openai') {
@@ -5711,10 +5710,10 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         system: system,
         char: name2,
         user: name1,
-        wiBefore: promptWorldInfoBefore,
-        wiAfter: promptWorldInfoAfter,
-        loreBefore: promptWorldInfoBefore,
-        loreAfter: promptWorldInfoAfter,
+        wiBefore: worldInfoBefore,
+        wiAfter: worldInfoAfter,
+        loreBefore: worldInfoBefore,
+        loreAfter: worldInfoAfter,
         anchorBefore: beforeScenarioAnchor.trim(),
         anchorAfter: afterScenarioAnchor.trim(),
         mesExamples: mesExamplesArray.join(''),
@@ -5740,6 +5739,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     // Story string rendered, safe to remove
     if (power_user.strip_examples) {
         mesExamplesArray = [];
+        exampleBlocks = { before: [], character: [], after: [] };
     }
 
     // Inject all Depth prompts. Chat Completion does it separately
@@ -5831,6 +5831,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     }
 
     let oaiMessages = [];
+    let oaiExampleBlocks = null;
     let oaiMessageExamples = [];
 
     if (main_api === 'openai') {
@@ -5838,7 +5839,12 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             coreChat,
             stripOldToolCalls,
         );
-        oaiMessageExamples = setOpenAIMessageExamples(mesExamplesArray);
+        oaiExampleBlocks = {
+            before: setOpenAIMessageExamples(exampleBlocks.before),
+            character: setOpenAIMessageExamples(exampleBlocks.character),
+            after: setOpenAIMessageExamples(exampleBlocks.after),
+        };
+        oaiMessageExamples = [...oaiExampleBlocks.before, ...oaiExampleBlocks.character, ...oaiExampleBlocks.after];
     }
 
     // hack for regeneration of the first message
@@ -6222,8 +6228,8 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             scenario,
             char: name2,
             user: name1,
-            worldInfoBefore: promptWorldInfoBefore,
-            worldInfoAfter: promptWorldInfoAfter,
+            worldInfoBefore,
+            worldInfoAfter,
             beforeScenarioAnchor,
             afterScenarioAnchor,
             storyString,
@@ -6298,8 +6304,8 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 charDescription: description,
                 charPersonality: personality,
                 scenario: scenario,
-                worldInfoBefore: promptWorldInfoBefore,
-                worldInfoAfter: promptWorldInfoAfter,
+                worldInfoBefore,
+                worldInfoAfter,
                 extensionPrompts: extensionPromptSnapshot,
                 bias: promptBias,
                 type: type,
@@ -6311,18 +6317,34 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 messages: oaiMessages,
                 messageExamples: oaiMessageExamples,
             };
+            let workingInputs = promptInputs;
+            if (agentMode) {
+                // Sealed after GENERATE_AFTER_DATA; must stay unprojected.
+                agentPromptInputs = {
+                    ...promptInputs,
+                    messageExamples: oaiExampleBlocks.character,
+                    worldInfoExamples: { before: oaiExampleBlocks.before, after: oaiExampleBlocks.after },
+                    authorsNoteAdditions,
+                };
+                workingInputs = projectAgentPromptInputs(agentPromptInputs, resolvedAgentContextPolicy);
+                // Live {{outlet}} reads globals, which must hold the root's projected WI injections.
+                flushWIInjections();
+                for (const [key, prompt] of Object.entries(workingInputs.extensionPrompts)) {
+                    if (isWorldInfoInjection(key)) {
+                        setExtensionPrompt(key, prompt.value, prompt.position, prompt.depth, prompt.scan, prompt.role);
+                    }
+                }
+            }
             const [prompt, counts, evaluatedToolData] = await prepareOpenAIMessages({
-                ...promptInputs,
+                ...workingInputs,
                 allowToolCalls: canAdvertiseToolCalls,
                 agentMode,
-                agentContextPolicy: resolvedAgentContextPolicy,
                 agentSystemPrompt: resolvedAgentSystemPrompt,
                 legacyMcpToolRound,
                 quietToolRequest,
             }, dryRun);
             toolData = evaluatedToolData;
             generate_data = { prompt: prompt };
-            if (agentMode) agentPromptInputs = promptInputs;
 
             // TODO: move these side-effects somewhere else, so this switch-case solely sets generate_data
             // counts will return false if the user has not enabled the token breakdown feature
@@ -6344,9 +6366,15 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     if (agentMode) {
         const context = captureMacroContext();
         context.state.lastGenerationType = type || 'normal';
+        const settings = structuredClone(oai_settings);
+        const currentPreset = {
+            apiId: 'openai',
+            name: settings.preset_settings_openai,
+            settings: getChatCompletionPreset(settings),
+        };
         const currentModelConnection = await buildCurrentModelConnectionSnapshot({
-            settings: oai_settings,
-            model: getChatCompletionModel(oai_settings),
+            settings,
+            model: getChatCompletionModel(settings),
             secretKey: resolveSecretKey(),
             secretState: secret_state,
         });
@@ -6354,6 +6382,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             generationType: type,
             promptInputs: agentPromptInputs,
             worldInfoActivation,
+            currentPreset,
             currentModelConnection,
         }, context, buildAgentReadOnlyMacros(context, characterFields, characterExamples)));
     }
@@ -6739,15 +6768,17 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
             throw new Error('agent.model_required: current chat-completion source did not resolve a model');
         }
 
+        const workingInputs = projectAgentPromptInputs(frozenRunInputSnapshot.promptInputs, agentContextPolicy);
+        const macroContext = createChatCompletionMacroContext(
+            createMacroContextFromSnapshot(frozenRunInputSnapshot, workingInputs), settings, model,
+        );
         const { generate_data: chatCompletionPayload } = await createGenerationParameters(
             settings,
             model,
             type,
             structuredClone(messages),
             {
-                jsonSchema, agentMode: true,
-                macroContext: createChatCompletionMacroContext(
-                    createMacroContextFromSnapshot(frozenRunInputSnapshot), settings, model),
+                jsonSchema, agentMode: true, macroContext,
             },
         );
 
@@ -7073,11 +7104,8 @@ async function doChatInject(messages, isContinue) {
 }
 
 function flushWIInjections() {
-    const depthPrefix = inject_ids.CUSTOM_WI_DEPTH;
-    const outletPrefix = inject_ids.CUSTOM_WI_OUTLET('');
-
     for (const key of Object.keys(extension_prompts)) {
-        if (key.startsWith(depthPrefix) || key.startsWith(outletPrefix)) {
+        if (isWorldInfoInjection(key)) {
             delete extension_prompts[key];
         }
     }
