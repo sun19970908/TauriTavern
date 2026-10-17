@@ -8815,6 +8815,63 @@ export function flushDebouncedChatSave() {
     return task();
 }
 
+// [SAVE-MERGE-20261018] 合并排队中尚未开始的保存：后到者写入的范围覆盖先到者时，
+// 先到者不再单独写盘，而是跟随真正执行写盘的那次保存的结果。写盘任务执行时才读取
+// 活状态，所以“后到者覆盖先到者”等价于把前者跑完，且不改变任何一次写盘的内容语义。
+// 只合并未开始（started 在任务首行同步置位）且确实被覆盖的任务；barrier（生成前必须
+// 落盘）、带 force 的先到者、以及写的不一定是当前聊天活状态的保存（显式 chatData /
+// chatName / mesId / withMetadata）不参与。
+const pendingSaves = new Set();
+const SAVE_SCOPE_RANK = Object.freeze({ metadata: 1, payload: 2 });
+const BARRIER_COMMIT_REASONS = new Set([CHAT_COMMIT_REASON.PROVIDER_BARRIER, CHAT_COMMIT_REASON.GENERATION_CHECKPOINT]);
+
+/**
+ * Enqueue a save that a later, wider save may take over. The returned promise follows
+ * whichever save actually writes, so a merged caller never sees a skipped write as done.
+ */
+function enqueueMergeableSave({ scope, barrier = false, force = false, task }) {
+    const entry = { scope, barrier, force, started: false, absorbedBy: null, followers: new Set() };
+    const completion = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
+
+    async function runTask() {
+        if (entry.absorbedBy) return;
+        entry.started = true;
+        pendingSaves.delete(entry);
+        try {
+            const value = await task();
+            entry.resolve(value);
+            for (const follower of entry.followers) follower.resolve(value);
+            return value;
+        } catch (error) {
+            entry.reject(error);
+            for (const follower of entry.followers) follower.reject(error);
+            throw error;
+        }
+    }
+
+    const run = enqueueChatSave(runTask);
+    run.catch(() => {}); // completion carries the outcome to callers
+
+    let absorbed = 0;
+    for (const previous of pendingSaves) {
+        if (previous.started || previous.absorbedBy || previous.barrier) continue;
+        if (SAVE_SCOPE_RANK[scope] < SAVE_SCOPE_RANK[previous.scope]) continue;
+        if (previous.force && !force) continue;
+        previous.absorbedBy = entry;
+        pendingSaves.delete(previous);
+        for (const follower of previous.followers) {
+            follower.absorbedBy = entry;
+            entry.followers.add(follower);
+        }
+        previous.followers.clear();
+        entry.followers.add(previous);
+        absorbed += 1;
+    }
+    if (absorbed > 0) console.debug(`[SAVE-MERGE] absorbed ${absorbed} pending save(s)`);
+    pendingSaves.add(entry);
+    return completion;
+}
+
 /**
  * Saves the chat to the server.
  * @param {object} [options] - Additional options.
@@ -8833,7 +8890,21 @@ export async function saveChat(...args) {
         throw new Error('saveChat called for a group chat');
     }
 
-    return enqueueChatSave(() => saveChatUnsafe(...args));
+    const options = (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) ? args[0] : null;
+    // Positional saves may target a caller-supplied file; only the supported option form
+    // (or a bare current-chat save) is safe to merge with later current-chat writes.
+    const explicit = options && (options.chatData !== undefined || options.chatName !== undefined
+        || options.mesId !== undefined || options.withMetadata !== undefined);
+    if (explicit || (args.length > 0 && !options)) {
+        return enqueueChatSave(() => saveChatUnsafe(...args));
+    }
+
+    return enqueueMergeableSave({
+        scope: 'payload',
+        barrier: BARRIER_COMMIT_REASONS.has(options?.commitReason),
+        force: options?.force === true,
+        task: () => saveChatUnsafe(...args),
+    });
 }
 
 /** Prompts for an integrity overwrite; reloads if the user declines. */
@@ -11052,19 +11123,22 @@ export async function saveMetadata() {
         return;
     }
 
-    return enqueueChatSave(() => runChatSave({
-        title: t`Chat could not be saved`,
-        save: () => {
-            const character = characters[this_chid];
-            return saveCharacterChatMetadata({
-                characterName: character.name,
-                avatarUrl: character.avatar,
-                fileName: character.chat,
-                chatMetadata: persistedChatMetadata(),
-            });
-        },
-        recover: () => saveChatUnsafe({ force: true }),
-    }));
+    return enqueueMergeableSave({
+        scope: 'metadata',
+        task: () => runChatSave({
+            title: t`Chat could not be saved`,
+            save: () => {
+                const character = characters[this_chid];
+                return saveCharacterChatMetadata({
+                    characterName: character.name,
+                    avatarUrl: character.avatar,
+                    fileName: character.chat,
+                    chatMetadata: persistedChatMetadata(),
+                });
+            },
+            recover: () => saveChatUnsafe({ force: true }),
+        }),
+    });
 }
 
 export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTATION) {
