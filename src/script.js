@@ -11186,24 +11186,19 @@ export async function saveMetadata() {
         return;
     }
 
-    // Header-only writes were never counted as record saves; keep that signal unchanged.
-    return enqueueMergeableSave({
-        scope: 'metadata',
-        track: false,
-        task: () => runChatSave({
-            title: t`Chat could not be saved`,
-            save: () => {
-                const character = characters[this_chid];
-                return saveCharacterChatMetadata({
-                    characterName: character.name,
-                    avatarUrl: character.avatar,
-                    fileName: character.chat,
-                    chatMetadata: persistedChatMetadata(),
-                });
-            },
-            recover: () => saveChatUnsafe({ force: true }),
-        }),
-    });
+    return enqueueMergeableSave({ scope: 'metadata', track: false, task: () => runChatSave({
+        title: t`Chat could not be saved`,
+        save: () => {
+            const character = characters[this_chid];
+            return saveCharacterChatMetadata({
+                characterName: character.name,
+                avatarUrl: character.avatar,
+                fileName: character.chat,
+                chatMetadata: persistedChatMetadata(),
+            });
+        },
+        recover: () => saveChatUnsafe({ force: true }),
+    }) });
 }
 
 export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTATION) {

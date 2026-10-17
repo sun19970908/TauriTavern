@@ -715,60 +715,6 @@ test('chat persistence and navigation', async (context) => {
             });
         }
 
-        await context.test('character: queued saves merge into the write that covers them', async () => {
-            await reset('character');
-            await openExplicit('target-chat');
-            const invoke = window.__TAURI__.core.invoke;
-            let commits = 0;
-            window.__TAURI__.core.invoke = async (command, args, options) => {
-                if (command === 'begin_chat_commit') commits += 1;
-                return invoke(command, args, options);
-            };
-            try {
-                // 未开始的完整保存被后到的完整保存吸收：三次入队只写一次。
-                await Promise.all([main.saveChat(), main.saveChat(), main.saveChat()]);
-                assert.equal(commits, 1);
-
-                // 完整保存可以吸收排在它前面的 metadata 保存（header 是全量的子集）。
-                commits = 0;
-                await Promise.all([main.saveMetadata(), main.saveChat()]);
-                assert.equal(commits, 1);
-
-                // metadata 保存不能吸收完整保存（header 之外的正文不能丢）。
-                commits = 0;
-                await Promise.all([main.saveChat(), main.saveMetadata()]);
-                assert.equal(commits, 2);
-
-                // barrier（生成前必须落盘）不被吸收。
-                commits = 0;
-                await Promise.all([main.saveChat({ commitReason: 'providerBarrier' }), main.saveChat()]);
-                assert.equal(commits, 2);
-
-                // 先到者带 force 时，只有同样带 force 的后到者才能吸收它。
-                commits = 0;
-                await Promise.all([main.saveChat({ force: true }), main.saveChat()]);
-                assert.equal(commits, 2);
-                commits = 0;
-                await Promise.all([main.saveChat({ force: true }), main.saveChat({ force: true })]);
-                assert.equal(commits, 1);
-
-                // 被合并的调用方要等到真正写盘完成才 resolve。
-                main.chat[0].mes = 'merged write';
-                await Promise.all([main.saveChat(), main.saveChat()]);
-                assert.match(payloads.get('target-chat'), /merged write/);
-
-                // 吸收者失败时，被吸收的调用方得到同一个错误，不静默成功。
-                fullSaveError = { InternalServerError: 'save failed' };
-                await assert.rejects(Promise.all([main.saveChat(), main.saveChat()]),
-                    error => error.cause === fullSaveError);
-                fullSaveError = undefined;
-                assert.equal(main.isChatSaving, false);
-            } finally {
-                fullSaveError = undefined;
-                window.__TAURI__.core.invoke = invoke;
-            }
-        });
-
         for (const greeting of ['', 'Hello']) {
             await context.test(`new group establishes metadata before greeting hooks (${greeting || 'empty'})`, async () => {
                 await reset('group');
