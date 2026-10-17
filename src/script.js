@@ -8953,8 +8953,11 @@ export async function saveChat(...args) {
     }
 
     const options = (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) ? args[0] : null;
-    if (options && (options.chatData !== undefined || options.chatName !== undefined
-        || options.mesId !== undefined || options.withMetadata !== undefined)) {
+    // Positional saves may target a caller-supplied file; only the supported option form
+    // (or a bare current-chat save) is safe to merge with later current-chat writes.
+    const explicit = options && (options.chatData !== undefined || options.chatName !== undefined
+        || options.mesId !== undefined || options.withMetadata !== undefined);
+    if (explicit || (args.length > 0 && !options)) {
         return trackChatRecordSave(() => enqueueChatSave(() => saveChatUnsafe(...args)));
     }
 

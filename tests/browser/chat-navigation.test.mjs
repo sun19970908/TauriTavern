@@ -739,6 +739,24 @@ test('chat persistence and navigation', async (context) => {
                 await Promise.all([main.saveChat(), main.saveMetadata()]);
                 assert.equal(commits, 2);
 
+                // barrier（生成前必须落盘）不被吸收。
+                commits = 0;
+                await Promise.all([main.saveChat({ commitReason: 'providerBarrier' }), main.saveChat()]);
+                assert.equal(commits, 2);
+
+                // 先到者带 force 时，只有同样带 force 的后到者才能吸收它。
+                commits = 0;
+                await Promise.all([main.saveChat({ force: true }), main.saveChat()]);
+                assert.equal(commits, 2);
+                commits = 0;
+                await Promise.all([main.saveChat({ force: true }), main.saveChat({ force: true })]);
+                assert.equal(commits, 1);
+
+                // 被合并的调用方要等到真正写盘完成才 resolve。
+                main.chat[0].mes = 'merged write';
+                await Promise.all([main.saveChat(), main.saveChat()]);
+                assert.match(payloads.get('target-chat'), /merged write/);
+
                 // 吸收者失败时，被吸收的调用方得到同一个错误，不静默成功。
                 fullSaveError = { InternalServerError: 'save failed' };
                 await assert.rejects(Promise.all([main.saveChat(), main.saveChat()]),
