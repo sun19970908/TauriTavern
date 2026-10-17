@@ -31,10 +31,10 @@ use tt_application::dto::agent_dto::{
     AgentSkillScopeRefsDto, AgentStartRunDto, AgentStartRunOptionsDto,
 };
 use tt_application::dto::character_dto::{
-    CharacterLorebookConflictResolution, CheckCharacterLorebookConflictDto, CreateCharacterDto,
-    DeleteCharacterDto, ExportCharacterContentDto, ImportCharacterDto, MergeCharacterCardDataDto,
-    ReplaceCharacterDto, ResolveCharacterLorebookConflictDto, UpdateAvatarDto,
-    UpdateCharacterCardDataDto, UpdateCharacterDto,
+    CharacterLorebookAdoptionChoice, CharacterLorebookAdoptionDto, CreateCharacterDto,
+    ExportCharacterContentDto, ImportCharacterDto, MergeCharacterCardDataDto, ReplaceCharacterDto,
+    ResolveCharacterLorebookAdoptionDto, UpdateAvatarDto, UpdateCharacterCardDataDto,
+    UpdateCharacterDto,
 };
 use tt_application::dto::chat_completion_dto::ChatCompletionGenerateRequestDto;
 use tt_application::errors::ApplicationError;
