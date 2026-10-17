@@ -8889,11 +8889,62 @@ export function flushDebouncedChatSave() {
  *
  * @returns {Promise<void>}
  */
-// [SAVE-DEDUP-20260829] 合并排队中尚未执行的相同保存（防元数据/变量风暴引发连发全量写盘）
-// 安全性：写盘任务执行时才读全局 chat 状态，先执行者写入的已是最新内容；
-// 挂靠仅发生在"先到者尚未开始执行"时（started 标志在任务闭包首行设置，与出队之间无间隙），
-// 已开始执行之后的新变化必然由新任务补写。chatData 显式快照保存不参与去重（写的是固定内容）。
-const pendingIdenticalSaves = new Map();
+// [SAVE-MERGE-20261018] 合并排队中尚未开始的保存：后到者写入的范围覆盖先到者时，
+// 先到者不再单独写盘，而是跟随真正执行写盘的那次保存的结果。写盘任务执行时才读取
+// 活状态，所以“后到者覆盖先到者”等价于把前者跑完，且不改变任何一次写盘的内容语义。
+// 只合并未开始（started 在任务首行同步置位）且确实被覆盖的任务；barrier（生成前必须
+// 落盘）、带 force 的先到者、以及写的不一定是当前聊天活状态的保存（显式 chatData /
+// chatName / mesId / withMetadata）不参与。
+const pendingSaves = new Set();
+const SAVE_SCOPE_RANK = Object.freeze({ metadata: 1, payload: 2 });
+const BARRIER_COMMIT_REASONS = new Set([CHAT_COMMIT_REASON.PROVIDER_BARRIER, CHAT_COMMIT_REASON.GENERATION_CHECKPOINT]);
+
+/**
+ * Enqueue a save that a later, wider save may take over. The returned promise follows
+ * whichever save actually writes, so a merged caller never sees a skipped write as done.
+ */
+function enqueueMergeableSave({ scope, barrier = false, force = false, track, task }) {
+    const entry = { scope, barrier, force, started: false, absorbedBy: null, followers: new Set() };
+    const completion = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
+
+    async function runTask() {
+        if (entry.absorbedBy) return;
+        entry.started = true;
+        pendingSaves.delete(entry);
+        try {
+            const value = await task();
+            entry.resolve(value);
+            for (const follower of entry.followers) follower.resolve(value);
+            return value;
+        } catch (error) {
+            entry.reject(error);
+            for (const follower of entry.followers) follower.reject(error);
+            throw error;
+        }
+    }
+
+    const run = track ? trackChatRecordSave(() => enqueueChatSave(runTask)) : enqueueChatSave(runTask);
+    run.catch(() => {}); // completion carries the outcome to callers
+
+    let absorbed = 0;
+    for (const previous of pendingSaves) {
+        if (previous.started || previous.absorbedBy || previous.barrier) continue;
+        if (SAVE_SCOPE_RANK[scope] < SAVE_SCOPE_RANK[previous.scope]) continue;
+        if (previous.force && !force) continue;
+        previous.absorbedBy = entry;
+        pendingSaves.delete(previous);
+        for (const follower of previous.followers) {
+            follower.absorbedBy = entry;
+            entry.followers.add(follower);
+        }
+        previous.followers.clear();
+        entry.followers.add(previous);
+        absorbed += 1;
+    }
+    if (absorbed > 0) console.debug(`[SAVE-MERGE] absorbed ${absorbed} pending save(s)`);
+    pendingSaves.add(entry);
+    return completion;
+}
 
 export async function saveChat(...args) {
     if (selected_group) {
@@ -8902,42 +8953,18 @@ export async function saveChat(...args) {
     }
 
     const options = (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) ? args[0] : null;
-    let dedupKey = null;
-    if (options && options.chatData === undefined) {
-        dedupKey = JSON.stringify([
-            options.chatName ?? null,
-            options.mesId ?? null,
-            options.withMetadata ?? null,
-            options.force ?? false,
-            options.commitReason ?? null,
-        ]);
+    if (options && (options.chatData !== undefined || options.chatName !== undefined
+        || options.mesId !== undefined || options.withMetadata !== undefined)) {
+        return trackChatRecordSave(() => enqueueChatSave(() => saveChatUnsafe(...args)));
     }
 
-    if (dedupKey !== null) {
-        const pending = pendingIdenticalSaves.get(dedupKey);
-        if (pending && !pending.started && pending.promise) {
-            console.debug('[SAVE-DEDUP] piggybacked on pending identical save');
-            return pending.promise;
-        }
-    }
-
-    const entry = { started: false, promise: null };
-    entry.promise = trackChatRecordSave(() => enqueueChatSave(async () => {
-        if (dedupKey !== null) {
-            entry.started = true;
-        }
-        try {
-            return await saveChatUnsafe(...args);
-        } finally {
-            if (dedupKey !== null) {
-                pendingIdenticalSaves.delete(dedupKey);
-            }
-        }
-    }));
-    if (dedupKey !== null) {
-        pendingIdenticalSaves.set(dedupKey, entry);
-    }
-    return entry.promise;
+    return enqueueMergeableSave({
+        scope: 'payload',
+        barrier: BARRIER_COMMIT_REASONS.has(options?.commitReason),
+        force: options?.force === true,
+        track: true,
+        task: () => saveChatUnsafe(...args),
+    });
 }
 
 /** Prompts for an integrity overwrite; reloads if the user declines. */
@@ -11156,19 +11183,24 @@ export async function saveMetadata() {
         return;
     }
 
-    return enqueueChatSave(() => runChatSave({
-        title: t`Chat could not be saved`,
-        save: () => {
-            const character = characters[this_chid];
-            return saveCharacterChatMetadata({
-                characterName: character.name,
-                avatarUrl: character.avatar,
-                fileName: character.chat,
-                chatMetadata: persistedChatMetadata(),
-            });
-        },
-        recover: () => saveChatUnsafe({ force: true }),
-    }));
+    // Header-only writes were never counted as record saves; keep that signal unchanged.
+    return enqueueMergeableSave({
+        scope: 'metadata',
+        track: false,
+        task: () => runChatSave({
+            title: t`Chat could not be saved`,
+            save: () => {
+                const character = characters[this_chid];
+                return saveCharacterChatMetadata({
+                    characterName: character.name,
+                    avatarUrl: character.avatar,
+                    fileName: character.chat,
+                    chatMetadata: persistedChatMetadata(),
+                });
+            },
+            recover: () => saveChatUnsafe({ force: true }),
+        }),
+    });
 }
 
 export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTATION) {

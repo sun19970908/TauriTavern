@@ -73,6 +73,8 @@ transport 解析完整 JSONL 后直接把同一对象数组交给核心调用方
 
 第一方聊天保存经由 `chat-payload-transport.js`；当前聊天由 `enqueueChatSave()` 串行调度，transport 不重复入队。兼容路由与事件契约见 [FrontendHostContract §4.3](../FrontendHostContract.md#43-路由表public)。
 
+排队中尚未开始的保存会被后到的、写入范围覆盖它的保存合并：完整保存合并未开始的完整保存与 metadata 保存，metadata 保存只合并 metadata 保存（因此 metadata 保存不会取消待执行的完整保存）。生成前必须落盘的保存（`PROVIDER_BARRIER` / `GENERATION_CHECKPOINT`）与写的不一定是当前聊天活状态的保存（显式 `chatData` / `chatName` / `mesId` / `withMetadata`）不参与。被合并的调用方等待真正执行写盘的那次保存的结果，失败同样传播。
+
 提交在首次异步让出前捕获 JSON 文本快照，当前聊天在队列任务开始时捕获；后续修改不混入本次保存。分帧限制传输开销，快照仍随内容规模增长。
 
 聊天与世界书共用 storage-core 的提交会话、帧上限和暂存生命周期，各仓储负责内容校验与发布。host 确认数据完整后才发布；平台传输限制见 [AndroidDevelopment §11](../AndroidDevelopment.md#11-android-大型-byte-ingress)。
