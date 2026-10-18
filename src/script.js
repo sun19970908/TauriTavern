@@ -8912,7 +8912,7 @@ function enqueueMergeableSave({ scope, barrier = false, force = false, task }) {
         entry.followers.add(previous);
         absorbed += 1;
     }
-    if (absorbed > 0) console.debug(`[SAVE-MERGE] absorbed ${absorbed} pending save(s)`);
+    if (absorbed > 0) console.info(`[SAVE-MERGE] ${scope} absorbed ${absorbed} pending save(s)`);
     pendingSaves.add(entry);
     return completion;
 }
