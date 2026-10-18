@@ -385,7 +385,7 @@ function SettingsApp({
                 </SettingsSection>
             )}
 
-            <SettingsBridgeSection tr={tr} />
+            <SettingsBridgeSection />
         </div>
     );
 }
