@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+#[cfg(desktop)]
 use crate::presentation::web_resources::download_dispatch;
 use crate::presentation::web_resources::tauri_resource_adapter::handle_tauri_web_resource_request;
 #[cfg(desktop)]
