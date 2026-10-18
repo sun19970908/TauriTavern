@@ -27,8 +27,7 @@ function invokeChatCommit(...args) {
 }
 
 // [CHAT-COMMIT-PROGRESS-20261018] Every chat write funnels through commitChatRecords, so measuring
-// here covers character/group x payload/metadata/metadataExtension. The queue-level
-// `tt-record-save` keeps its meaning: how many writes are still queued.
+// here covers character/group x payload/metadata/metadataExtension.
 const COMMIT_PROGRESS_EVENT = 'tt-chat-commit';
 const MEASURE_CHUNK_CHARS = Math.floor(64 * 1024 / 3);
 const textEncoder = new TextEncoder();

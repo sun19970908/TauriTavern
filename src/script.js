@@ -689,35 +689,6 @@ export function enqueueChatSave(task) {
     return run;
 }
 
-// [RECORD-SAVE-SIGNAL-20260829] 聊天记录写盘精确计数（保存悬浮窗信号源）
-// 统计范围：聊天记录文件的写盘任务，入队即计（含排队等待/压缩），完成即减
-// 不含：IndexedDB post-save（token cache / itemized prompts）、设置与角色卡保存、聊天导入/删除/改名
-let chatRecordSavePending = 0;
-function emitChatRecordSaveState() {
-    try { window.dispatchEvent(new CustomEvent('tt-record-save', { detail: { pending: chatRecordSavePending } })); } catch (_) { /* noop */ }
-}
-function trackChatRecordSave(run) {
-    chatRecordSavePending += 1;
-    // console.trace 不在 frontend-log-capture 的转发列表里，安卓 logcat 收不到；用 info 携带调用栈
-    // new Error().stack 首行的 "Error" 会被日志面板误渲染成报错，去掉首行只保留 at 帧列表
-    const recordSaveStack = (new Error().stack ?? '').split('\n').slice(1).join('\n');
-    console.info(`[RECORD-SAVE] #${chatRecordSavePending} enqueued\n${recordSaveStack}`);
-    emitChatRecordSaveState();
-    const settle = () => {
-        chatRecordSavePending = Math.max(0, chatRecordSavePending - 1);
-        emitChatRecordSaveState();
-    };
-    let p;
-    try {
-        p = run();
-    } catch (error) {
-        settle();
-        throw error;
-    }
-    return p.finally(settle);
-}
-// 启动广播一次，让悬浮窗确认信号已接通（橙点→蓝点）
-emitChatRecordSaveState();
 // [BUILD-TAG] 构建标记：确认当前运行的 script.js 版本
 console.info('[SCRIPT-BUILD] 20260829-stringifyyield');
 
@@ -8903,7 +8874,7 @@ const BARRIER_COMMIT_REASONS = new Set([CHAT_COMMIT_REASON.PROVIDER_BARRIER, CHA
  * Enqueue a save that a later, wider save may take over. The returned promise follows
  * whichever save actually writes, so a merged caller never sees a skipped write as done.
  */
-function enqueueMergeableSave({ scope, barrier = false, force = false, track, task }) {
+function enqueueMergeableSave({ scope, barrier = false, force = false, task }) {
     const entry = { scope, barrier, force, started: false, absorbedBy: null, followers: new Set() };
     const completion = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
 
@@ -8923,7 +8894,7 @@ function enqueueMergeableSave({ scope, barrier = false, force = false, track, ta
         }
     }
 
-    const run = track ? trackChatRecordSave(() => enqueueChatSave(runTask)) : enqueueChatSave(runTask);
+    const run = enqueueChatSave(runTask);
     run.catch(() => {}); // completion carries the outcome to callers
 
     let absorbed = 0;
@@ -8958,14 +8929,13 @@ export async function saveChat(...args) {
     const explicit = options && (options.chatData !== undefined || options.chatName !== undefined
         || options.mesId !== undefined || options.withMetadata !== undefined);
     if (explicit || (args.length > 0 && !options)) {
-        return trackChatRecordSave(() => enqueueChatSave(() => saveChatUnsafe(...args)));
+        return enqueueChatSave(() => saveChatUnsafe(...args));
     }
 
     return enqueueMergeableSave({
         scope: 'payload',
         barrier: BARRIER_COMMIT_REASONS.has(options?.commitReason),
         force: options?.force === true,
-        track: true,
         task: () => saveChatUnsafe(...args),
     });
 }
@@ -11186,7 +11156,7 @@ export async function saveMetadata() {
         return;
     }
 
-    return enqueueMergeableSave({ scope: 'metadata', track: false, task: () => runChatSave({
+    return enqueueMergeableSave({ scope: 'metadata', task: () => runChatSave({
         title: t`Chat could not be saved`,
         save: () => {
             const character = characters[this_chid];
