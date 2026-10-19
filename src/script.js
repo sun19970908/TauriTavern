@@ -33,6 +33,7 @@ import { initializeCodeMirrorEditor } from './scripts/tauri/codemirror-editor.js
 import { getStreamingRenderInterval, normalizeStreamingFps, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
 import {
     CHAT_COMMIT_REASON,
+    requestChatCommitCancellation,
     initializeColdSwipes,
     coldSwipesEnabled,
     acceptColdChatPayload,
@@ -8862,12 +8863,13 @@ export function flushDebouncedChatSave() {
  *
  * @returns {Promise<void>}
  */
-// [SAVE-MERGE-20261018] 合并排队中尚未开始的保存：后到者写入的范围覆盖先到者时，
-// 先到者不再单独写盘，而是跟随真正执行写盘的那次保存的结果。写盘任务执行时才读取
-// 活状态，所以“后到者覆盖先到者”等价于把前者跑完，且不改变任何一次写盘的内容语义。
-// 只合并未开始（started 在任务首行同步置位）且确实被覆盖的任务；barrier（生成前必须
-// 落盘）、带 force 的先到者、以及写的不一定是当前聊天活状态的保存（显式 chatData /
-// chatName / mesId / withMetadata）不参与。
+// [SAVE-MERGE-20261018] 后到者写入的范围覆盖先到者时，先到者不再单独写盘，而是跟随真正
+// 执行写盘的那次保存的结果。写盘任务执行时才读取活状态，所以“后到者覆盖先到者”等价于把
+// 前者跑完，且不改变任何一次写盘的内容语义。未开始的先到者直接从队列里 drop；已开始写的
+// 先到者在下一帧边界被取消（staging 文件作废，live 文件只由 finish 的原子 rename 替换，
+// 因此取消不构成任何腐败风险），其调用方的 promise 由吸收者结算。
+// barrier（生成前必须落盘）、带 force 的先到者、以及写的不一定是当前聊天活状态的保存
+// （显式 chatData / chatName / mesId / withMetadata）不参与。
 const pendingSaves = new Set();
 const SAVE_SCOPE_RANK = Object.freeze({ metadata: 1, payload: 2 });
 const BARRIER_COMMIT_REASONS = new Set([CHAT_COMMIT_REASON.PROVIDER_BARRIER, CHAT_COMMIT_REASON.GENERATION_CHECKPOINT]);
@@ -8883,16 +8885,20 @@ function enqueueMergeableSave({ scope, barrier = false, force = false, task }) {
     async function runTask() {
         if (entry.absorbedBy) return;
         entry.started = true;
-        pendingSaves.delete(entry);
         try {
             const value = await task();
             entry.resolve(value);
             for (const follower of entry.followers) follower.resolve(value);
             return value;
         } catch (error) {
+            // Taken over by a newer save: it settles this promise as a follower, whatever
+            // this task was doing when the takeover happened.
+            if (entry.absorbedBy) return;
             entry.reject(error);
             for (const follower of entry.followers) follower.reject(error);
             throw error;
+        } finally {
+            pendingSaves.delete(entry);
         }
     }
 
@@ -8900,12 +8906,17 @@ function enqueueMergeableSave({ scope, barrier = false, force = false, task }) {
     run.catch(() => {}); // completion carries the outcome to callers
 
     let absorbed = 0;
+    let cancelled = 0;
     for (const previous of pendingSaves) {
-        if (previous.started || previous.absorbedBy || previous.barrier) continue;
+        if (previous.absorbedBy || previous.barrier) continue;
         if (SAVE_SCOPE_RANK[scope] < SAVE_SCOPE_RANK[previous.scope]) continue;
         if (previous.force && !force) continue;
         previous.absorbedBy = entry;
         pendingSaves.delete(previous);
+        if (previous.started) {
+            cancelled += 1;
+            requestChatCommitCancellation();
+        }
         for (const follower of previous.followers) {
             follower.absorbedBy = entry;
             entry.followers.add(follower);
@@ -8914,7 +8925,9 @@ function enqueueMergeableSave({ scope, barrier = false, force = false, task }) {
         entry.followers.add(previous);
         absorbed += 1;
     }
-    if (absorbed > 0) console.info(`[SAVE-MERGE] ${scope} absorbed ${absorbed} pending save(s)`);
+    if (absorbed > 0) {
+        console.info(`[SAVE-MERGE] ${scope} absorbed ${absorbed} pending save(s)` + (cancelled > 0 ? `, cancelled ${cancelled} in-flight` : ''));
+    }
     pendingSaves.add(entry);
     return completion;
 }
@@ -8970,6 +8983,10 @@ export async function runChatSave({ save, recover, title }) {
     try {
         await save();
     } catch (error) {
+        if (error?.code === 'commit_superseded') {
+            // A newer save took this write over; it settles the caller, so this is not a failure.
+            throw error;
+        }
         if (error?.code !== 'integrity' || !recover) {
             console.error(error);
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, title);

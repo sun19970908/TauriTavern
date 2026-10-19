@@ -37,6 +37,18 @@ const measureScratch = new Uint8Array(MEASURE_CHUNK_CHARS * 3);
 const activeCommits = new Set();
 
 /**
+ * Cancellation hook of the single in-flight chat commit, or null between commits. Chat saves
+ * are serialized by `enqueueChatSave`, so at most one queued commit is registered at a time;
+ * the HTTP route that bypasses the queue can only ever cost its own save a loud failure.
+ */
+let cancelInFlightChatCommit = null;
+
+/** Ask the in-flight chat commit, if any, to abort at its next frame boundary. */
+export function requestChatCommitCancellation() {
+    cancelInFlightChatCommit?.();
+}
+
+/**
  * UTF-8 length of one record, encoded into a fixed scratch buffer so a large payload never needs a
  * second copy of its own bytes. The only cost is one extra encode pass over the records.
  */
@@ -126,12 +138,16 @@ async function commitChatRecords({ target, operation, records, commitReason }) {
         emitCommitProgress();
     };
 
+    let cancelled = false;
+    const previousCancellation = cancelInFlightChatCommit;
+    cancelInFlightChatCommit = () => { cancelled = true; };
     try {
         return await commitBytes({
             begin: () => invokeChatCommit('begin_chat_commit', { target, operation }),
             frames: maxChunkBytes => jsonlRecordsToByteChunks(records, { maxChunkBytes }),
             append: (body, options) => invokeChatCommit('append_chat_commit_chunk', body, options),
             onProgress: report,
+            shouldCancel: () => cancelled,
             finish: (sessionId, expectedSize) => {
                 report(expectedSize);
                 return invokeChatCommit('finish_chat_commit', {
@@ -143,6 +159,7 @@ async function commitChatRecords({ target, operation, records, commitReason }) {
             abort: sessionId => invokeChatCommit('abort_chat_commit', { sessionId }),
         });
     } finally {
+        cancelInFlightChatCommit = previousCancellation;
         activeCommits.delete(commit);
         emitCommitProgress();
     }
