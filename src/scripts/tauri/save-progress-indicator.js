@@ -5,17 +5,16 @@
  *
  * That pill is the right surface for this: startup removes it at APP_READY, so it is free afterwards,
  * and it belongs to no one else — the composer placeholder is shared with reply stages and any
- * extension that writes a stage line, and two owners of one line cannot restore correctly. The pill
- * is `pointer-events: none` and needs no layout, so it costs nothing on a phone.
+ * extension that writes a stage line, and two owners of one line cannot restore correctly.
+ *
+ * The pill markup lives here rather than in a shared module on purpose: on this branch save progress
+ * is its only consumer, and every file shared with startup is a merge conflict when upstream touches
+ * it. The style mirrors `startup/startup-status-overlay.js`; if upstream restyles that pill, this
+ * copy drifts and should be resynced by hand.
  *
  * It deliberately does not write `#chat_generation_status`: that element is the screen-reader
  * projection of the generation stage, and per-frame percentages would be noise there.
- *
- * Labels are ASCII and short because a localized label does not fit the pill on a phone. They are
- * derived from the commit `kind`, so the transport layer stays free of UI copy.
  */
-
-import { ensureStatusPill, isStatusPillPresent } from './status-pill.js';
 
 export const SAVE_PROGRESS_EVENT = 'tt-chat-commit';
 
@@ -29,6 +28,9 @@ export const SAVE_PROGRESS_MIN_VISIBLE_MS = 400;
  */
 export const SAVE_PROGRESS_SETTLE_MS = 300;
 
+/** Same element id startup uses; an existing pill means startup still owns the line. */
+const PILL_ID = 'tt-startup-status-overlay';
+
 const SHORT_LABELS = Object.freeze({
     payload: 'savechat',
     metadata: 'savemeta',
@@ -36,13 +38,35 @@ const SHORT_LABELS = Object.freeze({
 });
 
 /**
- * Owns the shared status pill, but only while it is free. Startup holds the same element, so an
- * existing pill means startup is still running and this feature stays out of its way.
+ * Owns the shared pill, but only while it is free.
  * @returns {{ show: (text: string) => void, hide: () => void }}
  */
 export function createSaveStatusPill() {
     /** @type {HTMLDivElement | null} */
     let owned = null;
+
+    function ensure() {
+        const existing = document.getElementById(PILL_ID);
+        if (existing instanceof HTMLDivElement) return existing;
+
+        const element = document.createElement('div');
+        element.id = PILL_ID;
+        element.style.position = 'fixed';
+        element.style.left = '12px';
+        element.style.bottom = '12px';
+        element.style.zIndex = '999999';
+        element.style.maxWidth = 'min(92vw, 560px)';
+        element.style.padding = '6px 10px';
+        element.style.borderRadius = '10px';
+        element.style.background = 'rgba(0, 0, 0, 0.55)';
+        element.style.color = '#fff';
+        element.style.font = '12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+        element.style.pointerEvents = 'none';
+        element.style.whiteSpace = 'pre-wrap';
+        element.textContent = '';
+        document.body.appendChild(element);
+        return element;
+    }
 
     return {
         show(text) {
@@ -50,8 +74,8 @@ export function createSaveStatusPill() {
                 owned.textContent = text;
                 return;
             }
-            if (isStatusPillPresent()) return; // Startup owns it.
-            owned = ensureStatusPill();
+            if (document.getElementById(PILL_ID)) return; // Startup owns it.
+            owned = ensure();
             owned.textContent = text;
         },
         hide() {

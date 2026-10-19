@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     createSaveProgressIndicator,
+    createSaveStatusPill,
     SAVE_PROGRESS_MIN_VISIBLE_MS,
     SAVE_PROGRESS_SETTLE_MS,
 } from '../src/scripts/tauri/save-progress-indicator.js';
@@ -108,4 +109,56 @@ test('consecutive writes bridge instead of hiding the pill twice', () => {
     target.emit({ pending: 0, primary: null });
     clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
     assert.equal(pill.state.hides, 1);
+});
+
+test('the pill is re-created once startup has removed it', () => {
+    /** @type {Map<string, any>} */
+    const nodes = new Map();
+    globalThis.HTMLDivElement = class {
+        constructor() { this.id = ''; this.textContent = ''; this.style = {}; }
+        remove() { nodes.delete(this.id); }
+    };
+    globalThis.document = {
+        body: { appendChild: node => { nodes.set(node.id, node); } },
+        createElement: () => new globalThis.HTMLDivElement(),
+        getElementById: id => nodes.get(id) ?? null,
+    };
+
+    const pill = createSaveStatusPill();
+    pill.show('savechat 53%');
+    assert.equal(nodes.get('tt-startup-status-overlay')?.textContent, 'savechat 53%');
+
+    pill.show('savechat 100%');
+    assert.equal(nodes.get('tt-startup-status-overlay')?.textContent, 'savechat 100%');
+
+    pill.hide();
+    assert.equal(nodes.get('tt-startup-status-overlay'), undefined);
+});
+
+test('a save status yields to a pill startup still owns', () => {
+    /** @type {Map<string, any>} */
+    const nodes = new Map();
+    globalThis.HTMLDivElement = class {
+        constructor() { this.id = ''; this.textContent = ''; this.style = {}; }
+        remove() { nodes.delete(this.id); }
+    };
+    globalThis.document = {
+        body: { appendChild: node => { nodes.set(node.id, node); } },
+        createElement: () => new globalThis.HTMLDivElement(),
+        getElementById: id => nodes.get(id) ?? null,
+    };
+
+    const startupPill = new globalThis.HTMLDivElement();
+    startupPill.id = 'tt-startup-status-overlay';
+    startupPill.textContent = 'Starting: loading core data…';
+    nodes.set(startupPill.id, startupPill);
+
+    const pill = createSaveStatusPill();
+    pill.show('savechat 53%');
+    assert.equal(startupPill.textContent, 'Starting: loading core data…', 'the startup line is untouched');
+
+    // Startup finishes and removes it; the save status takes the line over.
+    startupPill.remove();
+    pill.show('savechat 60%');
+    assert.equal(nodes.get('tt-startup-status-overlay')?.textContent, 'savechat 60%');
 });
