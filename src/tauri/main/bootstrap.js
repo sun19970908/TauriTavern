@@ -385,11 +385,6 @@ export function bootstrapTauriMain() {
     runAfterTauriReady(() => import('../../scripts/tauri/setting/setting-panel.js')
         .then(({ installTauriTavernSettingsPanel }) => installTauriTavernSettingsPanel())
         .catch((error) => { console.warn('TauriTavern: Failed to load settings panels:', error); }));
-    // Owns the composer placeholder before any feature writes it, so the host baseline is captured
-    // while the host still owns the line.
-    runAfterTauriReady(() => import('../../scripts/tauri/composer-placeholder.js')
-        .then(({ installComposerPlaceholder }) => installComposerPlaceholder())
-        .catch((error) => { console.warn('TauriTavern: Failed to install the composer placeholder lease:', error); }));
     // Decoration only: the indicator reads no application state, so it can mount before APP_READY.
     runAfterTauriReady(() => import('../../scripts/tauri/save-progress-indicator.js')
         .then(({ installSaveProgressIndicator }) => installSaveProgressIndicator())

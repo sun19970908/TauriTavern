@@ -3,10 +3,6 @@
 /**
  * Renders `tt-chat-commit` in the composer placeholder as `savechat:53%` / `savemeta:53%`.
  *
- * It does not own the placeholder any more: `composer-placeholder.js` does, and this module is one
- * source among others (reply stages outrank it). Ownership in one place is what keeps a skipped
- * restore from leaving an orphan line for the next run to adopt as the host's text.
- *
  * The placeholder is the least invasive surface: no new DOM, no layout height, which is what makes
  * it acceptable on a phone. The trade-off is that it is only visible while the composer is empty.
  * It deliberately leaves `#chat_generation_status` alone: that element is the screen-reader
@@ -16,19 +12,13 @@
  * derived from the commit `kind`, so the transport layer stays free of UI copy.
  */
 
-import { composerPlaceholder, COMPOSER_PLACEHOLDER_PRIORITY } from './composer-placeholder.js';
-
 export const SAVE_PROGRESS_EVENT = 'tt-chat-commit';
 
 /** A single-frame metadata write finishes in milliseconds; without a floor the line only flashes. */
 export const SAVE_PROGRESS_MIN_VISIBLE_MS = 400;
 
-/**
- * Consecutive writes drain the queue momentarily between them. A merged or cancelled commit
- * releases before the next one registers, so this has to outlast the merge machinery, not just the
- * queue hand-off; a shorter delay let the line fall back to the host placeholder mid-save.
- */
-export const SAVE_PROGRESS_SETTLE_MS = 300;
+/** Consecutive writes drain the queue momentarily between them; bridge that gap. */
+export const SAVE_PROGRESS_SETTLE_MS = 120;
 
 const SHORT_LABELS = Object.freeze({
     payload: 'savechat',
@@ -36,11 +26,9 @@ const SHORT_LABELS = Object.freeze({
     metadataExtension: 'savemeta',
 });
 
-const SOURCE_KEY = 'save';
-
 /**
  * @typedef {{
- *   lease?: import('./composer-placeholder.js').ComposerPlaceholderApi | null;
+ *   getTextarea: () => HTMLTextAreaElement | null;
  *   target?: EventTarget;
  *   now?: () => number;
  *   schedule?: (callback: () => void, ms: number) => any;
@@ -52,20 +40,25 @@ const SOURCE_KEY = 'save';
  * @param {SaveProgressIndicatorOptions} options
  */
 export function createSaveProgressIndicator({
-    lease,
+    getTextarea,
     target = window,
     now = () => performance.now(),
     schedule = (callback, ms) => setTimeout(callback, ms),
     cancel = timer => clearTimeout(timer),
-} = {}) {
-    // An explicitly null lease disables the indicator (tests); an omitted one resolves the
-    // installed lease on first use, so this module does not depend on bootstrap's import order.
-    const hasInjectedLease = lease !== undefined;
-    let resolved = lease ?? null;
+}) {
+    /** @type {HTMLTextAreaElement | null} */
+    let shownOn = null;
+    /** @type {string | null} */
+    let baseline = null;
+    /** @type {string | null} */
+    let written = null;
     let active = false;
     let shownAt = 0;
     /** @type {any} */
     let settleTimer = null;
+
+    /** @param {HTMLTextAreaElement} textarea */
+    const read = textarea => textarea.getAttribute('placeholder');
 
     function cancelSettle() {
         if (settleTimer === null) return;
@@ -73,22 +66,46 @@ export function createSaveProgressIndicator({
         settleTimer = null;
     }
 
-    function present(primary) {
-        if (!hasInjectedLease && !resolved) resolved = composerPlaceholder();
-        if (!resolved) return;
-        if (!active) {
-            active = true;
-            shownAt = now();
+    function restore() {
+        cancelSettle();
+        active = false;
+        const textarea = shownOn;
+        const previous = baseline;
+        const mine = written;
+        shownOn = null;
+        baseline = null;
+        written = null;
+        // Only undo our own text: the host or another extension may own the placeholder by now.
+        if (!textarea || read(textarea) !== mine) return;
+        if (previous === null) {
+            textarea.removeAttribute('placeholder');
+        } else {
+            textarea.setAttribute('placeholder', previous);
         }
-        const kind = typeof primary.kind === 'string' ? primary.kind : '';
-        const percent = Number.isFinite(primary.percent) ? Math.round(Number(primary.percent)) : 0;
-        resolved.set(SOURCE_KEY, `${SHORT_LABELS[kind] ?? 'save'}:${percent}%`, COMPOSER_PLACEHOLDER_PRIORITY.save);
     }
 
-    function release() {
-        if (!active) return;
-        active = false;
-        resolved?.clear(SOURCE_KEY);
+    /** @param {{ kind?: unknown, percent?: unknown }} primary */
+    function present(primary) {
+        const textarea = getTextarea();
+        if (!textarea) return;
+        if (!active) {
+            baseline = read(textarea);
+            active = true;
+            shownAt = now();
+        } else if (read(textarea) !== written) {
+            // Someone else replaced our text: adopt theirs as the baseline to return to.
+            baseline = read(textarea);
+        }
+        shownOn = textarea;
+        const kind = typeof primary.kind === 'string' ? primary.kind : '';
+        const percent = Number.isFinite(primary.percent) ? Math.round(Number(primary.percent)) : 0;
+        const text = `${SHORT_LABELS[kind] ?? 'save'}:${percent}%`;
+        if (read(textarea) === text) {
+            written = text;
+            return;
+        }
+        written = text;
+        textarea.setAttribute('placeholder', text);
     }
 
     function hide() {
@@ -99,7 +116,7 @@ export function createSaveProgressIndicator({
             settleTimer = schedule(hide, remaining);
             return;
         }
-        release();
+        restore();
     }
 
     /** @param {Event} event */
@@ -120,12 +137,19 @@ export function createSaveProgressIndicator({
     return {
         dispose() {
             target.removeEventListener(SAVE_PROGRESS_EVENT, onCommit);
-            cancelSettle();
-            release();
+            restore();
         },
     };
 }
 
+/** The disconnected composer advertises "Not connected to API!"; do not cover that. */
+function resolveComposerTextarea() {
+    const textarea = document.querySelector('#send_textarea');
+    if (!(textarea instanceof HTMLTextAreaElement)) return null;
+    if (document.querySelector('#send_form')?.classList.contains('no-connection')) return null;
+    return textarea;
+}
+
 export function installSaveProgressIndicator() {
-    return createSaveProgressIndicator();
+    return createSaveProgressIndicator({ getTextarea: resolveComposerTextarea });
 }

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createComposerPlaceholderLease } from '../src/scripts/tauri/composer-placeholder.js';
 import {
     createSaveProgressIndicator,
     SAVE_PROGRESS_MIN_VISIBLE_MS,
@@ -17,9 +16,7 @@ function fakeTextarea() {
         setAttribute: (_name, value) => { placeholder = value; },
         removeAttribute: () => { placeholder = null; },
         read: () => placeholder,
-        ownerDocument: {
-            defaultView: { MutationObserver: class { observe() {} disconnect() {} } },
-        },
+        overwrite: value => { placeholder = value; },
     };
 }
 
@@ -61,15 +58,14 @@ function setup() {
     const textarea = fakeTextarea();
     const clock = fakeClock();
     const target = fakeTarget();
-    const lease = createComposerPlaceholderLease(textarea);
     const indicator = createSaveProgressIndicator({
-        lease,
+        getTextarea: () => textarea,
         target,
         now: clock.now,
         schedule: clock.schedule,
         cancel: clock.cancel,
     });
-    return { textarea, clock, target, lease, indicator };
+    return { textarea, clock, target, indicator };
 }
 
 test('each commit kind renders its short label with the current percent', () => {
@@ -78,7 +74,7 @@ test('each commit kind renders its short label with the current percent', () => 
     target.emit({ pending: 1, primary: { kind: 'payload', percent: 12 } });
     assert.equal(textarea.read(), 'savechat:12%');
 
-    target.emit({ pending: 1, primary: { kind: 'payload', percent: 100 } });
+    target.emit({ pending: 1, primary: { kind: 'payload', percent: 100, status: 'finishing' } });
     assert.equal(textarea.read(), 'savechat:100%');
 
     target.emit({ pending: 1, primary: { kind: 'metadata', percent: 100 } });
@@ -121,35 +117,39 @@ test('consecutive writes bridge instead of restoring twice', () => {
     assert.equal(textarea.read(), BASELINE);
 });
 
-test('a reply stage outranks the save line and hands the line back afterwards', () => {
-    const { textarea, lease } = setup();
-    lease.set('run', '等待回复·4秒', 1);
+test('an external placeholder change becomes the new baseline', () => {
+    const { textarea, clock, target } = setup();
 
-    lease.set('save', 'savechat:55%', 0);
-    assert.equal(textarea.read(), '等待回复·4秒', 'the reply stage stays on top');
+    target.emit({ pending: 1, primary: { kind: 'payload', percent: 40 } });
+    // The host flips the connection state while a save is on screen.
+    textarea.overwrite('Not connected to API!');
+    target.emit({ pending: 1, primary: { kind: 'payload', percent: 60 } });
+    assert.equal(textarea.read(), 'savechat:60%');
 
-    lease.clear('run');
-    assert.equal(textarea.read(), 'savechat:55%', 'the save line resumes when the reply ends');
+    clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
+    target.emit({ pending: 0, primary: null });
+    clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
+    assert.equal(textarea.read(), 'Not connected to API!', 'restores the newer host text');
 });
 
-test('a missing lease never breaks the write path and dispose releases later text', () => {
+test('a missing composer never breaks the write path and dispose restores later text', () => {
     const clock = fakeClock();
     const target = fakeTarget();
-    const withoutLease = createSaveProgressIndicator({
-        lease: null, target, now: clock.now, schedule: clock.schedule, cancel: clock.cancel,
+    let textarea = null;
+    const indicator = createSaveProgressIndicator({
+        getTextarea: () => textarea,
+        target,
+        now: clock.now,
+        schedule: clock.schedule,
+        cancel: clock.cancel,
     });
 
-    assert.doesNotThrow(() => target.emit({ pending: 1, primary: { kind: 'payload', percent: 10 } }));
+    target.emit({ pending: 1, primary: { kind: 'payload', percent: 10 } });
     assert.doesNotThrow(() => target.emit({ pending: 0, primary: null }));
     clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
-    withoutLease.dispose();
 
-    const textarea = fakeTextarea();
-    const lease = createComposerPlaceholderLease(textarea);
-    const indicator = createSaveProgressIndicator({
-        lease, target, now: clock.now, schedule: clock.schedule, cancel: clock.cancel,
-    });
-
+    // The composer returns while the save is still running.
+    textarea = fakeTextarea();
     target.emit({ pending: 1, primary: { kind: 'payload', percent: 80 } });
     assert.equal(textarea.read(), 'savechat:80%');
 
