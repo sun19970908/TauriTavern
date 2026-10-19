@@ -73,7 +73,7 @@ function measureRecords(records) {
 }
 
 function emitCommitProgress() {
-    // Contract tests run against a stub window that only carries __TAURI__.
+    // Contract tests install a stub window with no dispatchEvent; a browser always has one.
     if (typeof window?.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') return;
     const first = activeCommits.values().next().value;
     try {
