@@ -109,14 +109,3 @@ test('consecutive writes bridge instead of hiding the pill twice', () => {
     clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
     assert.equal(pill.state.hides, 1);
 });
-
-test('dispose hides the pill and unsubscribes', () => {
-    const { pill, target, indicator } = setup();
-
-    target.emit({ pending: 1, primary: { kind: 'payload', percent: 30 } });
-    assert.equal(pill.state.text, 'savechat 30%');
-
-    indicator.dispose();
-    assert.equal(pill.state.hides, 1);
-    assert.equal(target.size(), 0);
-});

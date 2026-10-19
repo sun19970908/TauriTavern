@@ -64,7 +64,7 @@ export function createSaveStatusPill() {
 
 /**
  * @typedef {{
- *   pill?: { show: (text: string) => void, hide: () => void };
+ *   pill: { show: (text: string) => void, hide: () => void };
  *   target?: EventTarget;
  *   now?: () => number;
  *   schedule?: (callback: () => void, ms: number) => any;
@@ -76,12 +76,12 @@ export function createSaveStatusPill() {
  * @param {SaveProgressIndicatorOptions} options
  */
 export function createSaveProgressIndicator({
-    pill = createSaveStatusPill(),
+    pill,
     target = window,
     now = () => performance.now(),
     schedule = (callback, ms) => setTimeout(callback, ms),
     cancel = timer => clearTimeout(timer),
-} = {}) {
+}) {
     let active = false;
     let shownAt = 0;
     /** @type {any} */
@@ -142,5 +142,5 @@ export function createSaveProgressIndicator({
 }
 
 export function installSaveProgressIndicator() {
-    return createSaveProgressIndicator();
+    return createSaveProgressIndicator({ pill: createSaveStatusPill() });
 }
