@@ -1,4 +1,5 @@
 import { encodeIpcByteBody } from './ipc-byte-body.js';
+import { BYTE_HEADERS } from '../../kernel/byte-protocol.js';
 
 /**
  * Thrown when a newer save takes this commit over. It travels the existing failure path
@@ -32,7 +33,7 @@ export async function commitBytes({ begin, frames, append, finish, abort, onProg
         for await (const frame of frames(maxFrameBytes)) {
             if (shouldCancel?.()) throw commitSupersededError();
             const { body, headers: encodingHeaders } = encodeIpcByteBody(frame);
-            const headers = { ...encodingHeaders, 'session-id': sessionId, offset: String(offset) };
+            const headers = { ...encodingHeaders, [BYTE_HEADERS.sessionId]: sessionId, [BYTE_HEADERS.offset]: String(offset) };
             const accepted = Number(await append(body, { headers }));
             if (accepted !== offset + frame.byteLength) {
                 throw new Error(`Host commit returned unexpected offset ${accepted}`);
