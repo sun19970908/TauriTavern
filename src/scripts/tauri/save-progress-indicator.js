@@ -17,14 +17,28 @@ export const SAVE_PROGRESS_EVENT = 'tt-chat-commit';
 /** A single-frame metadata write finishes in milliseconds; without a floor the line only flashes. */
 export const SAVE_PROGRESS_MIN_VISIBLE_MS = 400;
 
-/** Consecutive writes drain the queue momentarily between them; bridge that gap. */
-export const SAVE_PROGRESS_SETTLE_MS = 120;
+/**
+ * Consecutive writes drain the queue momentarily between them. A merged or cancelled commit
+ * releases before the next one registers, so this has to outlast the merge machinery, not just the
+ * queue hand-off; a shorter delay let the line fall back to the host placeholder mid-save.
+ */
+export const SAVE_PROGRESS_SETTLE_MS = 300;
 
 const SHORT_LABELS = Object.freeze({
     payload: 'savechat',
     metadata: 'savemeta',
     metadataExtension: 'savemeta',
 });
+
+/**
+ * Our own progress line. It must never be adopted as the host's placeholder: a restore that is
+ * skipped leaves our text on screen, and the next run would otherwise capture it as the baseline
+ * and keep restoring that stale percentage forever.
+ */
+const PROGRESS_TEXT = /^(?:savechat|savemeta|save):\d{1,3}%$/;
+
+/** Last placeholder seen that was the host's own, kept across runs for the case above. */
+let lastHostBaseline = null;
 
 /**
  * @typedef {{
@@ -60,6 +74,14 @@ export function createSaveProgressIndicator({
     /** @param {HTMLTextAreaElement} textarea */
     const read = textarea => textarea.getAttribute('placeholder');
 
+    /** The host's own placeholder, never our progress line. */
+    function captureBaseline(textarea) {
+        const value = read(textarea);
+        if (value !== null && PROGRESS_TEXT.test(value)) return lastHostBaseline;
+        lastHostBaseline = value;
+        return value;
+    }
+
     function cancelSettle() {
         if (settleTimer === null) return;
         cancel(settleTimer);
@@ -89,12 +111,12 @@ export function createSaveProgressIndicator({
         const textarea = getTextarea();
         if (!textarea) return;
         if (!active) {
-            baseline = read(textarea);
+            baseline = captureBaseline(textarea);
             active = true;
             shownAt = now();
         } else if (read(textarea) !== written) {
             // Someone else replaced our text: adopt theirs as the baseline to return to.
-            baseline = read(textarea);
+            baseline = captureBaseline(textarea);
         }
         shownOn = textarea;
         const kind = typeof primary.kind === 'string' ? primary.kind : '';

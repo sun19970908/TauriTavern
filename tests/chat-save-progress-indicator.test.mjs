@@ -157,3 +157,23 @@ test('a missing composer never breaks the write path and dispose restores later 
     assert.equal(textarea.read(), BASELINE);
     assert.equal(target.size(), 0);
 });
+
+test('a leftover progress line never becomes the baseline to restore', () => {
+    const { textarea, clock, target } = setup();
+
+    target.emit({ pending: 1, primary: { kind: 'payload', percent: 100 } });
+    clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
+    target.emit({ pending: 0, primary: null });
+    clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
+    assert.equal(textarea.read(), BASELINE);
+
+    // A restore that was skipped leaves our own line behind; the next run must not adopt it.
+    textarea.overwrite('savemeta:100%');
+    target.emit({ pending: 1, primary: { kind: 'payload', percent: 5 } });
+    assert.equal(textarea.read(), 'savechat:5%');
+
+    clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
+    target.emit({ pending: 0, primary: null });
+    clock.advance(SAVE_PROGRESS_SETTLE_MS + SAVE_PROGRESS_MIN_VISIBLE_MS);
+    assert.equal(textarea.read(), BASELINE, 'restores the host text, not the stale percentage');
+});
