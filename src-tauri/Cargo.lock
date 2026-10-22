@@ -8596,12 +8596,13 @@ dependencies = [
 
 [[package]]
 name = "tauritavern"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
  "block2",
  "bytes",
+ "cairo-rs",
  "chrono",
  "dispatch2",
  "dunce",
@@ -8619,6 +8620,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tauri",
  "tauri-build",
  "tauri-plugin-barcode-scanner",
@@ -8658,6 +8660,9 @@ dependencies = [
  "ttsync-core",
  "url",
  "uuid",
+ "webkit2gtk",
+ "webview2-com",
+ "windows 0.62.2",
  "zip",
 ]
 
@@ -9315,6 +9320,7 @@ dependencies = [
  "futures-util",
  "jsonwebtoken",
  "percent-encoding",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

@@ -32,7 +32,7 @@ import {
 import { getGroupNames, selected_group } from './group-chats.js';
 import { extension_prompt_roles, extension_prompt_types } from './extension-prompts.js';
 import { allowlistSettingAllows, getActiveIosPolicyCapabilities } from './tauritavern/ios-policy.js';
-import { agentMessageProjection } from './tauritavern/agent/agent-model-messages.js';
+import { toAgentModelMessage } from './tauritavern/agent/agent-model-messages.js';
 import { projectToolTurns } from './tauritavern/tool-turn-projection.js';
 import { canReplayProviderMetadata, getChatCompletionRequestContext } from './tauritavern/provider-replay.js';
 import { applyParamOmissions, getEffectiveGenerationSettings } from './tauri/generation-params/omission.js';
@@ -1243,6 +1243,7 @@ function getPromptAssemblyRuntime(runtime = null) {
 
 function createHeadlessChatCompletionPromptManager(settings, {
     macroContext,
+    contextKind,
 } = {}) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
         throw new Error('prompt_assembly.settings_required: Headless prompt assembly requires chat-completion settings');
@@ -1257,7 +1258,9 @@ function createHeadlessChatCompletionPromptManager(settings, {
     assemblyPromptManager.activeCharacter = { id: configuration.promptOrder.dummyId };
     assemblyPromptManager.saveServiceSettings = () => Promise.resolve();
     assemblyPromptManager.tryGenerate = () => Promise.resolve();
-    assemblyPromptManager.tokenHandler = new TokenHandler((messages, full) => countTokensOpenAIAsync(messages, full, serviceSettings));
+    assemblyPromptManager.tokenHandler = new TokenHandler(contextKind === 'session'
+        ? async () => 0
+        : (messages, full) => countTokensOpenAIAsync(messages, full, serviceSettings));
     assemblyPromptManager.substituteParams = (content, options = {}) => substitutePromptParams(content ?? '', options, {
         macroContext,
     });
@@ -1591,12 +1594,8 @@ async function populateChatHistory(messages, prompts, chatCompletion, type = nul
         const chatPrompt = chatPool[index];
 
         if (Array.isArray(chatPrompt.agentMessages)) {
-            const group = await Promise.all(chatPrompt.agentMessages.map((message, partIndex) =>
-                Message.fromAgentMessage(message, `agentHistory-${index}-${partIndex}`, assemblyTokenHandler)));
-            if (!chatCompletion.canAffordAll(group)) {
-                if (chatPrompt.required) throw new TokenBudgetExceededError('agentCurrentUserMessage');
-                break;
-            }
+            const group = chatPrompt.agentMessages.map((message, partIndex) =>
+                Message.fromAgentMessage(message, `agentHistory-${index}-${partIndex}`));
             for (const message of group.reverse()) chatCompletion.insertAtStart(message, 'chatHistory');
             sourceCount += chatPrompt.sourceCount;
             index += 1;
@@ -2443,7 +2442,11 @@ export async function prepareOpenAIMessages({
     if (power_user.console_log_prompts) chatCompletion.enableLogging();
 
     const userSettings = activePromptManager.serviceSettings;
-    chatCompletion.setTokenBudget(userSettings.openai_max_context, userSettings.openai_max_tokens);
+    // Runtime compaction owns the budget for the entire Session prompt.
+    chatCompletion.setTokenBudget(
+        assemblyRuntime.contextKind === 'session' ? Number.POSITIVE_INFINITY : userSettings.openai_max_context,
+        assemblyRuntime.contextKind === 'session' ? 0 : userSettings.openai_max_tokens,
+    );
     let chatSourceCount = 0;
     let toolData = null;
 
@@ -2520,6 +2523,25 @@ export async function prepareOpenAIMessages({
     return [chat, activePromptManager.tokenHandler.counts, toolData];
 }
 
+export function createAgentPromptSnapshot(payload, { settings, contextPolicy, worldInfoActivation }) {
+    if (!Array.isArray(payload?.messages)) {
+        throw new Error('agent.prompt_snapshot_messages_required: prompt assembly must produce messages');
+    }
+    const { messages, prompt: _prompt, ...generationParameters } = payload;
+    return {
+        acceptsImages: isImageInliningSupported(settings) === true,
+        contextLimits: {
+            context: settings.openai_max_context,
+            response: settings.openai_max_tokens,
+            tokenizerModel: getTokenizerModel(settings),
+        },
+        contextPolicy,
+        ...(worldInfoActivation ? { worldInfoActivation } : {}),
+        messages: messages.map(toAgentModelMessage),
+        generationParameters,
+    };
+}
+
 /**
  * @param {{
  *   settings?: Record<string, unknown>;
@@ -2562,6 +2584,7 @@ export async function assembleOpenAIChatCompletionPrompt({
     const extensionPrompts = normalizePromptAssemblyExtensionPrompts(promptInputs.extensionPrompts);
     const assemblyPromptManager = createHeadlessChatCompletionPromptManager(settings, {
         macroContext,
+        contextKind,
     });
     const runtime = createPromptAssemblyRuntime({
         promptManager: assemblyPromptManager,
@@ -2605,7 +2628,7 @@ export async function assembleOpenAIChatCompletionPrompt({
     return {
         messages,
         chatCompletionPayload,
-        tokenCounts,
+        ...(contextKind === 'chat' ? { tokenCounts } : {}),
     };
 }
 
@@ -4746,7 +4769,7 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null, al
                     if (type !== 'impersonate' && !jsonSchema) {
                         text = appendClaudeRefusalWarning(text, stopStatus.message);
                     }
-                } else if (stopStatus?.code === 'model.output_truncated') {
+                } else if (stopStatus) {
                     toastr.error(stopStatus.message, t`Claude response truncated`);
                 }
 
@@ -4790,7 +4813,7 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null, al
                 message.content = appendClaudeRefusalWarning(message.content, stopStatus.message);
                 data.content?.push({ type: 'text', text: warning });
             }
-        } else if (stopStatus?.code === 'model.output_truncated') {
+        } else if (stopStatus) {
             toastr.error(stopStatus.message, t`Claude response truncated`);
         }
 
@@ -5177,15 +5200,9 @@ class Message {
         return message;
     }
 
-    static async fromAgentMessage(agentMessage, identifier, messageTokenHandler) {
-        const projection = agentMessageProjection(agentMessage);
-        const message = new Message(projection.role, projection.content, identifier);
+    static fromAgentMessage(agentMessage, identifier) {
+        const message = new Message(agentMessage.role, '', identifier);
         message.agentMessage = agentMessage;
-        message.tokens = await messageTokenHandler.countAsync({
-            ...projection,
-            ...(projection.tool_calls ? { tool_calls: JSON.stringify(projection.tool_calls) } : {}),
-            ...(projection.native ? { native: JSON.stringify(projection.native) } : {}),
-        });
         return message;
     }
 

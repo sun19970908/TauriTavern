@@ -255,7 +255,9 @@ export function bootstrapTauriMain() {
     installNativeShareBridge();
 
     const context = createTauriMainContext({ invoke });
-    installHostAbi(context); installLayoutApi(); installChatApi(context); installChatSurfaceApi(); installCharacterCardsApi(context); installAgentApi(context); installLlmConnectionsApi(context); installMcpApi(context); installSkillApi(context); installDevApi(context); installExtensionStoreApi(context); installDbApi(context); installWorldInfoApi();
+    installHostAbi(context); installLayoutApi(); installChatApi(context); installChatSurfaceApi(); installCharacterCardsApi(context);
+    const restoreAgentAssemblyBridges = installAgentApi(context);
+    installLlmConnectionsApi(context); installMcpApi(context); installSkillApi(context); installDevApi(context); installExtensionStoreApi(context); installDbApi(context); installWorldInfoApi();
     installMainApiOptionParking();
     installWorldInfoGlobalSelectorSelect2Enforcer();
     if (perfEnabled) {
@@ -383,6 +385,7 @@ export function bootstrapTauriMain() {
     runAfterTauriReady(() => import('../../scripts/tauri/save-progress-indicator.js')
         .then(({ installSaveProgressIndicator }) => installSaveProgressIndicator())
         .catch((error) => { console.warn('TauriTavern: Failed to install the save progress indicator:', error); }));
+    eventSource.once(event_types.APP_READY, restoreAgentAssemblyBridges);
     // This panel imports application state as well as rendering it.
     eventSource.once(event_types.APP_READY, () => {
         void import('../../scripts/tauri/generation-params/panel.js')
