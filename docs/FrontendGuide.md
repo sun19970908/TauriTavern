@@ -204,6 +204,22 @@ src/
 - Prompt 组装和生成判断使用本次生效设置，`createGenerationParameters()` 出口统一省略字段；用户显式配置的 Additional Parameters 仍拥有最终覆盖权。
 - JSON 视图只编辑当前格式可用的参数，非法输入整体不应用；它不是最终请求预览，后续仍遵循渠道与模型的转换规则。
 
+## 6.5 CodeMirror 编辑器
+
+挂载与生命周期在 `src/scripts/tauri/codemirror-editor.js`，编辑器本体在按需加载的 `src/lib-bundle-editor.js`。设置关闭时保留原生 textarea。
+
+- 源 textarea 是唯一的值来源。编辑器通过 `onChange` 通知有改动，调用方需要文本时用 `flush()` 写回源 textarea；`flush({ input: true })` 会在源上派发 `input`，沿用 textarea 原有的处理链。
+- 外壳 `.tt-codemirror-editor` 接管源 textarea 的盒子，并继承其 `resize`。读取尺寸时不排版源文本，除非源的高度由内容决定（`field-sizing: content`）。挂载先等调用方当前的同步工作结束（例如抽屉显示出源 textarea），编辑器包加载后在下一帧之前完成，源 textarea 不会先单独渲染；编辑器在页面外建好，再一次性放入页面。全屏结束后恢复用户调整过的高度。
+- 编辑器 DOM 的位置随引擎而定，判断集中在 `codemirror-editor.js`。Chromium 宿主（Windows、Android、OpenHarmony）把它放在外壳的 open shadow root 中：Blink 每次 DOM 变化都会重查编辑器外围的 `:has()` 锚点，隔离后页面选择器既不匹配它，也不会因它重算样式。WebKit 宿主（macOS、iOS、Linux）把它留在页面中：在 WebKit 的 shadow root 里，替换一段延伸到最后一行的选区的编辑，会把页面内容拉进编辑器。页面 CSS 和脚本不依赖编辑器内部 DOM 是否可见。
+- 原始 `input`/`beforeinput` 停在外壳；键盘与焦点事件照常冒泡，判断焦点时需要看进 shadow root（见 `isInputElementInFocus()`）。
+- 页面通过两处与编辑器样式交互：主题自定义属性自然继承，`--tt-editor-tools: none` 隐藏工具栏（查找替换仍可打开）；查找面板打开时外壳带 `data-search-open`。
+- 使用原生光标和选区，每次按键只产生一帧。
+
+## 6.6 样式与合成成本
+
+- `:has()` 之后的最右复合选择器要带类、ID、属性或标签。Blink 的所有 `:has()` 规则共用一个失效集，一条以 `:first-child`、`:not(...)` 这类无特征复合结尾的规则，会让每个 `:has()` 锚点在 DOM 变化时重算整棵子树。规则要表达“除某个元素外的全部”这类通用语义时，不要把最右复合改成已知类名的白名单，扩展插入的控件会漏掉；先看 `:has()` 条件是否已由别处保证。例如编辑消息时 ST 本身会隐藏 `.mes_buttons`，所以隐藏工具消息非编辑按钮的规则不需要 `:has(.edit_textarea)`。
+- 成批出现的控件不要无谓成为滚动容器。每个可见的滚动容器都会增加每一帧的整页合成成本；世界书条目标题按内容自适应高度，因此设为 `overflow: hidden`。
+
 ## 7. 插件系统前端适配
 
 ### 7.1 设计目标
@@ -403,6 +419,15 @@ TauriTavern 自有的状态型 UI 作为 SillyTavern first-party extension 挂�
   - `window.__TAURITAVERN_PERF__.exportJson({ includeResources: true })` 直接拿到 JSON 字符串
   - `await window.__TAURITAVERN_PERF__.copyReport()` 通过原生写入器复制到剪贴板
 - HUD 操作：拖动标题栏移动（位置持久化），点击标题栏展开/收起；桌面端可用 `Ctrl+Alt+P` 切换开关。
+
+### 10.2 性能基线
+
+`tests/perf/` 守住前端优化不退化。`pnpm run test:perf`（已接入 `pnpm run check`）在 Playwright 固定版本的 Chromium headless shell 里，经 Web Host 运行构建后的前端：80 条消息的聊天、200 条世界书，第一条 10 万字，宿主身份为 Windows 桌面。每个场景步骤统计引擎做了多少工作，与提交的 `tests/perf/baseline.json` 比较。首次运行前安装浏览器：`pnpm exec playwright-core install --only-shell chromium`。
+
+- 计的是工作量，不是耗时，所以与机器快慢无关：事件派发；样式重算次数、其中强制的次数与重算的元素数；布局次数、强制次数与布局的对象数；有样式或布局工作的帧数与合成更新；以及步骤结束后的页面规模：请求数、元素数、可见滚动容器数、回收后仍存活的节点、布局对象与事件监听器。
+- 任一计数偏离基线超过 10%（至少 2）即失败，变少也算。有意的改变用 `pnpm run test:perf -- --update` 重新记录，基线变化随提交评审；升级 `playwright-core` 换了 Chromium 后也要重新记录。
+- 计数与机器快慢无关，靠的是测量环境的约定：动画与平滑滚动关闭；短于一帧的定时器只在下一帧之前执行，一串 jQuery Deferred 回调因此落在同一帧；步骤进行中，1 秒以内的较长定时器和网络响应都先扣住，等页面静默（主线程连续三个帧间隔没有工作）后再执行或逐个放行，页面看似静默之后就不会再有迟到的工作；页面不带 query 打开。按这些约定，CPU 限速到 6 倍时计数仍在余量之内。页面报错、控制台错误或请求失败时直接失败，避免比较坏掉的页面。
+- 新增场景：在 `tests/perf/` 放 `*.perf.mjs`，默认导出 `async (app) => {}`，用 `app.measure(name, ...inputs)` 计量一组输入。每个输入之后页面都会静默下来，再进行下一个，所以输入的划分决定哪些工作可以合并：回复的每个 token 是一个输入（经 `__perfReply.push()` 与 `end()` 送入）；连续打字放在同一个输入里，用帧隔开，防抖工作只在最后执行一次。点击坐标用 `app.centerOf(locator)` 在步骤之前取得，步骤里用 `page.mouse` 与 `page.keyboard` 发送真实输入，避免驱动自身的事件计入。新场景应在 CPU 限速（`Emulation.setCPUThrottlingRate`）下核对计数仍在余量之内。
 
 ## 11. 工程守护（Guardrails + 类型检查）
 
