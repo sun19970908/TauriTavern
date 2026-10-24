@@ -211,14 +211,26 @@ src/
 - 源 textarea 是唯一的值来源。编辑器通过 `onChange` 通知有改动，调用方需要文本时用 `flush()` 写回源 textarea；`flush({ input: true })` 会在源上派发 `input`，沿用 textarea 原有的处理链。
 - 外壳 `.tt-codemirror-editor` 接管源 textarea 的盒子，并继承其 `resize`。读取尺寸时不排版源文本，除非源的高度由内容决定（`field-sizing: content`）。挂载先等调用方当前的同步工作结束（例如抽屉显示出源 textarea），编辑器包加载后在下一帧之前完成，源 textarea 不会先单独渲染；编辑器在页面外建好，再一次性放入页面。全屏结束后恢复用户调整过的高度。
 - 编辑器 DOM 的位置随引擎而定，判断集中在 `codemirror-editor.js`。Chromium 宿主（Windows、Android、OpenHarmony）把它放在外壳的 open shadow root 中：Blink 每次 DOM 变化都会重查编辑器外围的 `:has()` 锚点，隔离后页面选择器既不匹配它，也不会因它重算样式。WebKit 宿主（macOS、iOS、Linux）把它留在页面中：在 WebKit 的 shadow root 里，替换一段延伸到最后一行的选区的编辑，会把页面内容拉进编辑器。页面 CSS 和脚本不依赖编辑器内部 DOM 是否可见。
+- 页面中的编辑器样式由 style-mod 写进 `<head>` 的一个 `<style>`。它原本每次挂载都重写这段文本，让整页重算样式；`patches/style-mod@4.1.3.patch` 在文本不变时跳过重写，升级 style-mod 时确认上游是否已经修好。
 - 原始 `input`/`beforeinput` 停在外壳；键盘与焦点事件照常冒泡，判断焦点时需要看进 shadow root（见 `isInputElementInFocus()`）。
 - 页面通过两处与编辑器样式交互：主题自定义属性自然继承，`--tt-editor-tools: none` 隐藏工具栏（查找替换仍可打开）；查找面板打开时外壳带 `data-search-open`。
 - 使用原生光标和选区，每次按键只产生一帧。
 
 ## 6.6 样式与合成成本
 
-- `:has()` 之后的最右复合选择器要带类、ID、属性或标签。Blink 的所有 `:has()` 规则共用一个失效集，一条以 `:first-child`、`:not(...)` 这类无特征复合结尾的规则，会让每个 `:has()` 锚点在 DOM 变化时重算整棵子树。规则要表达“除某个元素外的全部”这类通用语义时，不要把最右复合改成已知类名的白名单，扩展插入的控件会漏掉；先看 `:has()` 条件是否已由别处保证。例如编辑消息时 ST 本身会隐藏 `.mes_buttons`，所以隐藏工具消息非编辑按钮的规则不需要 `:has(.edit_textarea)`。
-- 成批出现的控件不要无谓成为滚动容器。每个可见的滚动容器都会增加每一帧的整页合成成本；世界书条目标题按内容自适应高度，因此设为 `overflow: hidden`。
+- Blink 的所有 `:has()` 规则共用一个失效集，锚点包住的界面越大，DOM 变化时重查的代价越大。所以：
+  - `:has()` 写在规则主体上，不挂在 `body`、`#top-settings-holder` 这类大容器上；
+  - 参数里不检查 `style` 属性，需要按显示状态选择时，由改变状态的代码写类或属性；
+  - `:has()` 之后的最右复合带类、ID 或属性；
+  - 不要为了绕开 `:has()` 改用已知类名的白名单，扩展插入的控件会漏掉。
+- 兄弟组合子不要以 `*` 或纯伪类结尾、左侧又没有特征（如 `* + *`），否则 `body` 的子元素一有增删，整个 `body` 都要重算。`> * + *` 写成 `> :not(:first-child)`。
+- WebKit 中，`:has()` 后面接兄弟组合子、参数又检查状态伪类时（如 `#a:has(#b:checked) ~ #c`），页面上任何该状态的变化都会引起整页重查。改写成后代关系：`#共同父元素:has(#b:checked) #c`。
+- 成批出现的控件不要成为滚动容器，每个可见的滚动容器都会增加每一帧的合成成本。世界书标题因此按内容自适应高度，设为 `overflow: hidden`。
+- WebKit 有两种情况会重算整个文档的样式：内存占用较高时（macOS 上约 1.5 GB 以上）每 30 s 一次，以及每次打开、关闭模态 `<dialog>`。成本随渲染树里的元素数增长；原生下拉框还要重新测量选项文字，含 U+FE0F（emoji 表现选择符）的文字尤其慢。所以成批出现的下拉框，选项文字不带 U+FE0F；长列表里远离可见区域的行，不留在渲染树里。
+- 长列表的条目用 `content-visibility: auto`，并按实际高度给出 `contain-intrinsic-block-size`。WebKit 的 `content-visibility` 不省样式计算，所以世界书还会让远离可见区域的条目休眠：由 `IntersectionObserver` 判断远近，休眠条目设为 `content-visibility: hidden`，标题栏 `display: none`。休眠要守住两点：
+  - 不改变条目尺寸。`hidden` 让条目保持上次渲染的高度；否则条目会在唤醒前塌缩，快速滚动停下后列表会反复伸缩、闪烁。
+  - 不让内容变得无法测量。只隐藏标题栏，其余部分仍能读取布局，休眠时打开的条目也能正确挂载编辑器。依赖布局的初始化（如测量标题）放到唤醒时做；持有焦点的条目不休眠。
+- WebKit 每次按下鼠标、或删除持有选区的节点时，会在页面里搜索放置选区的位置，在由表单组成的长列表里要好几秒。世界书列表因此对字段以外的按下调用 `preventDefault()`，同时让当前焦点 `blur()`（`change` 时保存的字段靠失焦提交）；拆除列表前先清除其中的选区。不要用 `user-select: none` 代替，WKWebView 仍会搜索。
 
 ## 7. 插件系统前端适配
 
