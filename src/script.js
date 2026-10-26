@@ -9650,6 +9650,23 @@ export async function saveSettings(loopCounter = 0) {
     return settingsSavePromise;
 }
 
+/**
+ * Refresh the save baseline (disk revision + Persona snapshot) without applying
+ * it to the UI.
+ *
+ * A full getSettings() apply is unsafe in the 409 recovery path: the panel
+ * runtime parks (detaches) the closed settings drawer, so DOM lookups inside
+ * applySettingsSnapshot throw and abort the retry. Saving only needs the
+ * revision the on-disk state is actually at, plus the Persona baseline.
+ */
+async function refreshSettingsSaveBaseline() {
+    const data = await fetchSettingsSnapshot();
+    if (data?.result === 'file not find' || !data?.settings) {
+        throw new Error('Settings snapshot is unavailable');
+    }
+    captureSettingsSaveState(JSON.parse(data.settings), data.tauritavern_settings_revision);
+}
+
 async function saveSettingsNow(loopCounter = 0) {
     if (!settingsReady) {
         console.warn('Settings not ready, scheduling another save');
@@ -9710,14 +9727,16 @@ async function saveSettingsNow(loopCounter = 0) {
         if (isSettingsConflictError(error)) {
             // [SETTINGS-409-20260910] 基线过期自愈：刷新时旧页面可能仍在写盘，bootstrap 的 GET 读到写入前的
             // 旧 revision 当作基线 → 之后每一次 patch 保存都被判 409，页面永久无法保存设置。
-            // 这里重拉一次设置（刷新基线 revision）并原样重试一次保存；失败才按原来的方式提示用户。
+            // 这里只重拉基线（revision + Persona 快照，不动 UI）并原样重试一次保存；失败才按原来的方式提示用户。
+            // 不能走完整 getSettings()：设置抽屉关闭时面板运行时会摘除停放的 DOM，
+            // applySettingsSnapshot 里的 #max_context 等查询会抛错并中断重试（历史 409 就是这么"修不好"的）。
             if (settingsConflictRecovering) {
                 // 重试本身仍冲突（真的被外部改了）：交回最外层统一提示，避免递归与重复 toast
                 return false;
             }
             settingsConflictRecovering = true;
             try {
-                await getSettings();
+                await refreshSettingsSaveBaseline();
                 if (await saveSettingsNow(loopCounter)) {
                     return true;
                 }
