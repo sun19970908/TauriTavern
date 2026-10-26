@@ -14411,7 +14411,16 @@ jQuery(async function () {
 
     window.addEventListener('beforeunload', (e) => {
         const lifecycleOwnsChatSave = Boolean(sessionStateFlushPromise) && !sessionFlushStartedWithChatSave;
-        if ((isChatSaving && !lifecycleOwnsChatSave) || this_edit_mes_id >= 0) {
+        // [SETTINGS-UNLOAD] 设置尚未落盘时同样拦一次刷新。
+        // settingsSavePending：改动还在 debounce 窗口内，尚未发起保存；
+        // settingsSavePromise：保存请求已在飞。
+        // 卸载时的 lifecycle flush 是 fire-and-forget：请求要么随页面销毁被取消（改动丢失），
+        // 要么已进主进程、晚于新页 bootstrap GET 落盘（新页基线过期 → 之后保存 409）。
+        const settingsFlushPending = settingsSavePending || Boolean(settingsSavePromise);
+        if (settingsFlushPending) {
+            console.warn(`[SETTINGS-UNLOAD] beforeunload blocked: pending=${settingsSavePending} inflight=${Boolean(settingsSavePromise)}`);
+        }
+        if ((isChatSaving && !lifecycleOwnsChatSave) || this_edit_mes_id >= 0 || settingsFlushPending) {
             e.preventDefault();
             e.returnValue = true;
         }
