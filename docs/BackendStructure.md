@@ -199,6 +199,8 @@ src-tauri/crates/tauritavern/src/
 
 这里可以触碰 `tauri::AppHandle`、window、plugin、platform API。这里不写业务用例。
 
+setup 不会因用户数据失败。宿主设置与 iOS 策略的启动快照（`app/startup_profile.rs`）在异步初始化中读取，失败经 `BackendReadiness` 显示在启动失败对话框，外壳不会在窗口出现前退出。
+
 ### 6.2 Composition root
 
 `app/composition/*` 是唯一可以同时知道 application service 与 concrete adapter 的地方。
@@ -329,6 +331,8 @@ TauriTavern 用户数据中的私有状态放在 `_tauritavern` 下，例如 age
 
 设置分区与迁移归 `tt-adapter-storage-core` 的设置仓储，前端 API 保持完整设置对象。同步约定见 [Sync](CurrentState/Sync.md#独立设置范围)。
 
+设置快照沿用上游的设置备份布局：`default-user/backups/settings_<handle>_<时间>.json`，保留最新 50 份，与聊天备份同属 `backups` 同步数据集；旧版写在 `snapshots/` 的快照在启动时迁入。
+
 设置保存复用共享字节提交；领域层定义修复与 revision 规则，应用层协调保存、恢复及 Persona 独立确认。仓储与归档共用文件清单和修复规则，读取及归档投影不回写源数据。
 
 文件写入以单文件原子发布为边界，持久化写入在发布前同步文件；失败不回退为覆盖复制。具体保证见[文件系统实现](../src-tauri/crates/tt-adapter-storage-core/src/file_system.rs)。跨 adapter 不为复用文件 helper 引入仓储依赖。
@@ -366,7 +370,7 @@ pnpm run check:rust-boundaries
 
 ```bash
 pnpm run test:rust
-pnpm run test:perf:backend
+pnpm run test:perf
 pnpm run check:rust:dev
 cargo test --manifest-path src-tauri/Cargo.toml -p <affected-crate> <focused-test>
 ```
