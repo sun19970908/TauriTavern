@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
@@ -110,7 +110,9 @@ fn proxy_client() -> Result<&'static Client, CommandError> {
 
     let client = tt_adapter_http::build_http_client(Client::builder(), crate::product::USER_AGENT)
         .map_err(|error| {
-            CommandError::InternalServerError(format!("Failed to build plugin proxy client: {error}"))
+            CommandError::InternalServerError(format!(
+                "Failed to build plugin proxy client: {error}"
+            ))
         })?;
     Ok(PROXY_CLIENT.get_or_init(|| client))
 }
@@ -120,8 +122,12 @@ async fn execute_proxy(
     target: String,
 ) -> Result<PluginProxyResponseDto, CommandError> {
     let client = proxy_client()?;
-    let method = Method::from_bytes(request.method.to_uppercase().as_bytes())
-        .map_err(|error| CommandError::BadRequest(format!("Invalid proxy method '{}': {error}", request.method)))?;
+    let method = Method::from_bytes(request.method.to_uppercase().as_bytes()).map_err(|error| {
+        CommandError::BadRequest(format!(
+            "Invalid proxy method '{}': {error}",
+            request.method
+        ))
+    })?;
     let timeout = Duration::from_millis(
         request
             .timeout_ms
@@ -135,10 +141,12 @@ async fn execute_proxy(
         // malformed pair means the contract is broken: fail fast with context
         // instead of silently forwarding a degraded request. Validation stays
         // manual because reqwest's header() panics on invalid names/values.
-        let header_name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|error| CommandError::BadRequest(format!("Invalid proxy header name '{name}': {error}")))?;
-        let header_value = HeaderValue::from_bytes(value.as_bytes())
-            .map_err(|error| CommandError::BadRequest(format!("Invalid proxy header value for '{name}': {error}")))?;
+        let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+            CommandError::BadRequest(format!("Invalid proxy header name '{name}': {error}"))
+        })?;
+        let header_value = HeaderValue::from_bytes(value.as_bytes()).map_err(|error| {
+            CommandError::BadRequest(format!("Invalid proxy header value for '{name}': {error}"))
+        })?;
         builder = builder.header(header_name, header_value);
     }
 
@@ -152,7 +160,9 @@ async fn execute_proxy(
         // as "backend absent" to probe-driven extensions, so surface them as
         // a 502 payload instead of an IPC error.
         Err(error) => {
-            return Ok(gateway_error_response(format!("Bridge target unreachable: {error}")))
+            return Ok(gateway_error_response(format!(
+                "Bridge target unreachable: {error}"
+            )));
         }
     };
 
@@ -177,7 +187,9 @@ async fn execute_proxy(
             }
             Ok(None) => break,
             Err(error) => {
-                return Ok(gateway_error_response(format!("Bridge target read failed: {error}")))
+                return Ok(gateway_error_response(format!(
+                    "Bridge target read failed: {error}"
+                )));
             }
         }
     }
@@ -251,11 +263,8 @@ mod tests {
 
     #[test]
     fn validate_target_rejects_paths_outside_the_plugin_namespace() {
-        let error = validate_target(&request(
-            "http://127.0.0.1:8000",
-            "/api/chats/get",
-        ))
-        .unwrap_err();
+        let error =
+            validate_target(&request("http://127.0.0.1:8000", "/api/chats/get")).unwrap_err();
         assert!(matches!(error, CommandError::BadRequest(_)));
     }
 
