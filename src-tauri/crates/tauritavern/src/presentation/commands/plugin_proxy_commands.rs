@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{State, WebviewWindow};
 
 use crate::app::AppState;
 use crate::presentation::commands::helpers::log_command;
@@ -68,7 +68,7 @@ pub struct PluginProxyResponseDto {
 pub async fn plugin_proxy_request(
     request: PluginProxyRequestDto,
     locale: String,
-    app_handle: AppHandle,
+    window: WebviewWindow,
     app_state: State<'_, Arc<AppState>>,
 ) -> Result<PluginProxyResponseDto, CommandError> {
     log_command("plugin_proxy_request");
@@ -77,7 +77,7 @@ pub async fn plugin_proxy_request(
     ensure_user_endpoint_access(
         Some(request.base_url.trim().trim_end_matches('/').to_string()),
         &locale,
-        &app_handle,
+        &window,
         &app_state.services.user_endpoint_access_service,
     )
     .await?;
