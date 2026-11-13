@@ -77,7 +77,7 @@ import {
 } from './scripts/tauritavern/agent/agent-run-controller.js';
 import { agentErrorMessage } from './scripts/tauritavern/agent/agent-error-presenter.js';
 import { normalizeAgentContextPolicy, projectAgentPromptInputs } from './scripts/tauritavern/agent/agent-context-policy.js';
-import { prepareCurrentPromptPayload } from './tauri/main/api/agent-prompt-snapshot.js';
+import { createCurrentPromptSnapshotSeed, prepareCurrentPromptPayload } from './tauri/main/api/agent-prompt-snapshot.js';
 import { buildPromptAssemblyPayload } from './tauri/main/api/agent-prompt-assembly.js';
 import { normalizeAgentSystemPrompt } from './scripts/tauritavern/agent/agent-system-prompt.js';
 import { readLegacyToolInvocations, stripOldToolTurns } from './scripts/tauritavern/tool-turn-projection.js';
@@ -6356,7 +6356,6 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
 
     let generate_data;
     let agentPromptInputs;
-    let toolData;
     switch (main_api) {
         case 'koboldhorde':
         case 'kobold':
@@ -6431,7 +6430,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                     }
                 }
             }
-            const [prompt, counts, evaluatedToolData] = await prepareOpenAIMessages({
+            const [prompt, counts, toolData] = await prepareOpenAIMessages({
                 ...workingInputs,
                 allowToolCalls: canAdvertiseToolCalls,
                 agentMode,
@@ -6439,8 +6438,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 legacyMcpToolRound,
                 quietToolRequest,
             }, dryRun);
-            toolData = evaluatedToolData;
-            generate_data = { prompt: prompt };
+            generate_data = { prompt, toolData };
 
             // TODO: move these side-effects somewhere else, so this switch-case solely sets generate_data
             // counts will return false if the user has not enabled the token breakdown feature
@@ -6561,7 +6559,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 streamingProcessor.firstMessageText = '';
             }
 
-            streamingProcessor.generator = await sendStreamingRequest(type, generate_data, { jsonSchema, allowToolCalls: canAdvertiseToolCalls, toolData, legacyMcpToolRound });
+            streamingProcessor.generator = await sendStreamingRequest(type, generate_data, { jsonSchema, allowToolCalls: canAdvertiseToolCalls, legacyMcpToolRound });
 
             hideSwipeButtons();
             let getMessage = await streamingProcessor.generate();
@@ -6635,7 +6633,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 });
             }
         } else {
-            return await sendGenerationRequest(type, generate_data, { jsonSchema, allowToolCalls: canAdvertiseToolCalls, toolData, legacyMcpToolRound });
+            return await sendGenerationRequest(type, generate_data, { jsonSchema, allowToolCalls: canAdvertiseToolCalls, legacyMcpToolRound });
         }
     }
 
@@ -6834,15 +6832,17 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
         throw new Error('agent.chat_completion_required: Agent Mode currently requires the OpenAI/chat-completion path');
     }
 
-    const messages = generateData?.prompt;
-    if (!Array.isArray(messages)) {
-        throw new Error('agent.prompt_snapshot_messages_required: Generate did not produce chat-completion messages');
-    }
     if (!agentContextPolicy) {
         throw new Error('agent.context_policy_required: Agent Mode did not resolve an Agent context policy');
     }
 
     const frozenRunInputSnapshot = normalizeFrozenRunInputSnapshot(generateData.frozenRunInputSnapshot);
+    const currentPromptSnapshotSeed = createCurrentPromptSnapshotSeed(generateData, {
+        generationType: type,
+        contextPolicy: agentContextPolicy,
+        jsonSchema,
+        frozenRunInputSnapshot,
+    });
     const promptAssembly = await prepareAgentPromptAssemblyForRun({
         generationType: type,
         profileId,
@@ -6856,13 +6856,7 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
 
     if (promptAssembly.mode === 'currentPromptSnapshot') {
         const prepared = await prepareCurrentPromptPayload({
-            currentPromptSnapshotSeed: {
-                generationType: type,
-                messages,
-                contextPolicy: agentContextPolicy,
-                jsonSchema,
-                worldInfoActivation: frozenRunInputSnapshot.worldInfoActivation,
-            },
+            currentPromptSnapshotSeed,
             frozenRunInputSnapshot,
         });
         payload = prepared.payload;
@@ -7604,7 +7598,6 @@ function syncLastInContextMessageMarker() {
  * @typedef {object} AdditionalRequestOptions
  * @property {JsonSchema} [jsonSchema]
  * @property {boolean} [allowToolCalls]
- * @property {object|null} [toolData] Evaluated legacy tool data for this generation round.
  * @property {object|null} [legacyMcpToolRound] Private MCP tools for this Legacy generation round.
  */
 
@@ -7618,7 +7611,7 @@ function syncLastInContextMessageMarker() {
  */
 export async function sendGenerationRequest(type, data, options = {}) {
     if (main_api === 'openai') {
-        return await sendOpenAIRequest(type, data.prompt, abortController.signal, options);
+        return await sendOpenAIRequest(type, data.prompt, abortController.signal, { ...options, toolData: data.toolData });
     }
 
     if (main_api === 'koboldhorde') {
@@ -7654,7 +7647,7 @@ export async function sendStreamingRequest(type, data, options = {}) {
 
     switch (main_api) {
         case 'openai':
-            return await sendOpenAIRequest(type, data.prompt, streamingProcessor.abortController.signal, options);
+            return await sendOpenAIRequest(type, data.prompt, streamingProcessor.abortController.signal, { ...options, toolData: data.toolData });
         case 'textgenerationwebui':
             return await generateTextGenWithStreaming(data, streamingProcessor.abortController.signal);
         case 'novel':
