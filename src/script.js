@@ -333,7 +333,7 @@ import {
     getInstructMacroValues,
 } from './scripts/instruct-mode.js';
 import { initLocales, t, translate } from './scripts/i18n.js';
-import { captureTokenCacheSaveState, getFriendlyTokenizerName, getTokenCount, getTokenCountAsync, initTokenizers, saveTokenCache, warmTokenizerCache } from './scripts/tokenizers.js';
+import { getFriendlyTokenizerName, getTokenCount, getTokenCountAsync, initTokenizers, saveTokenCache, warmTokenizerCache } from './scripts/tokenizers.js';
 import {
     user_avatar,
     primeUserAvatarsSnapshot,
@@ -11278,18 +11278,14 @@ export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTA
         ? saveGroupChat(selected_group, true, false, commitReason)
         : saveChat({ commitReason });
 
-    // Keep prompt/token persistence serialized with chat writes to avoid
+    // Keep itemized prompt persistence serialized with chat writes to avoid
     // chat switches corrupting per-chat IndexedDB state.
     const chatId = getCurrentChatId();
-    const tokenCacheSaveState = captureTokenCacheSaveState(chatId);
     const itemizedPromptsSnapshot = captureItemizedPromptsSaveSnapshot(chatId);
-    const postSavePromise = enqueueChatSave(async () => {
-        await saveTokenCache(tokenCacheSaveState);
-        await saveItemizedPrompts(chatId, {
-            entriesSnapshot: itemizedPromptsSnapshot,
-            cloneFromActive: false,
-        });
-    });
+    const postSavePromise = enqueueChatSave(() => saveItemizedPrompts(chatId, {
+        entriesSnapshot: itemizedPromptsSnapshot,
+        cloneFromActive: false,
+    }));
 
     // [MUTATION-ASYNC-TOGGLE-20260827] 异步开关：由酒馆助手脚本 QR 按钮切换，运行时生效、无需重启。
     // 状态存 extension_settings.tavernHelperToggle.mutationAsync，默认关（同步）。
@@ -11300,11 +11296,16 @@ export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTA
             console.warn('[BYPASS-PERF-FIREFORGET] Background post-save failed:', error);
         });
 
+        // 上游在保存末尾持久化当前聊天的 token 计数；异步模式下同样不阻塞主线程。
+        saveTokenCache().catch((error) => {
+            console.warn('[BYPASS-PERF-FIREFORGET] Background token cache save failed:', error);
+        });
+
         // saveChat fire-and-forget：主线程不等 HTTP 写盘（94MB chat 全量重写阻塞 3~4.5 分钟）
         fireAndForgetSaveChat(savePromise, commitReason);
     } else {
         // 同步模式（默认）：恢复原始行为，等 chat 文件 + token/itemized 都写盘完成再返回
-        await Promise.all([savePromise, postSavePromise]);
+        await Promise.all([savePromise, postSavePromise, saveTokenCache()]);
     }
 }
 
