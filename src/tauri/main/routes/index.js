@@ -22,6 +22,7 @@ import { registerTtsRoutes } from './tts-routes.js';
 import { registerVectorRoutes } from './vector-routes.js';
 import { registerSpriteRoutes } from './sprite-routes.js';
 import { registerPluginProxyRoutes } from './plugin-proxy-routes.js';
+import { registerCorsProxyRoutes } from './cors-proxy-routes.js';
 
 export function registerRoutes(router, context, responses) {
     registerSystemRoutes(router, context, responses);
@@ -48,4 +49,5 @@ export function registerRoutes(router, context, responses) {
     registerTtsRoutes(router, context, responses);
     registerStatsRoutes(router, context, responses);
     registerPluginProxyRoutes(router, context, responses);
+    registerCorsProxyRoutes(router, context);
 }

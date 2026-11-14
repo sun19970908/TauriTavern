@@ -136,6 +136,11 @@ async fn deliver_host_resource(
         return;
     }
 
+    let Some(bytes) = bytes.into_bytes() else {
+        tracing::warn!(%url, "Host resource download body is streamed; native save is unsupported");
+        return;
+    };
+
     let chosen_url = url.clone();
     let chosen_content_type = content_type.clone();
     let written = tauri::async_runtime::spawn_blocking(move || {
@@ -280,7 +285,7 @@ async fn deliver_via_staging(
 }
 
 async fn discard_staged(staged: &Path) {
-    if let Err(error) = staging::discard_file(staged).await {
+    if let Err(error) = staging::discard(staged).await {
         tracing::warn!(%error, "Failed to discard staged download file");
     }
 }

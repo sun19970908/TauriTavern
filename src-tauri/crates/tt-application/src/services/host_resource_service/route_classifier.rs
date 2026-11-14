@@ -11,8 +11,7 @@ pub(crate) enum HostResourceRoute {
     UserDataAsset,
 }
 
-pub(crate) fn classify_host_resource_route(uri: &http::Uri) -> Option<HostResourceRoute> {
-    let path = uri.path();
+pub(crate) fn classify_host_resource_route(path: &str) -> Option<HostResourceRoute> {
     if path == USER_CSS_ROUTE {
         return Some(HostResourceRoute::UserCss);
     }
@@ -35,31 +34,25 @@ pub(crate) fn classify_host_resource_route(uri: &http::Uri) -> Option<HostResour
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::Uri;
-
-    fn classify_path(path: &'static str) -> Option<HostResourceRoute> {
-        let uri: Uri = path.parse().expect("valid uri");
-        classify_host_resource_route(&uri)
-    }
 
     #[test]
     fn keeps_browser_resource_route_order() {
         assert_eq!(
-            classify_path("/css/user.css"),
+            classify_host_resource_route("/css/user.css"),
             Some(HostResourceRoute::UserCss)
         );
         assert_eq!(
-            classify_path("/scripts/extensions/third-party/a/b.js"),
+            classify_host_resource_route("/scripts/extensions/third-party/a/b.js"),
             Some(HostResourceRoute::ThirdPartyAsset)
         );
         assert_eq!(
-            classify_path("/thumbnail"),
+            classify_host_resource_route("/thumbnail"),
             Some(HostResourceRoute::Thumbnail)
         );
         assert_eq!(
-            classify_path("/backgrounds/a.mp4"),
+            classify_host_resource_route("/backgrounds/a.mp4"),
             Some(HostResourceRoute::UserDataAsset)
         );
-        assert_eq!(classify_path("/index.html"), None);
+        assert_eq!(classify_host_resource_route("/index.html"), None);
     }
 }

@@ -1,10 +1,6 @@
 import { callGenericPopup, POPUP_RESULT, POPUP_TYPE } from '../../../popup.js';
 import { translate } from '../../../i18n.js';
-import {
-    openDialog,
-    setDataRoot,
-    updateTauriTavernSettings,
-} from '../../../../tauri-bridge.js';
+import { pickDataRoot, updateTauriTavernSettings } from '../../../../tauri-bridge.js';
 import { runTaskOrPopup, showErrorPopup } from './popup-utils.js';
 import {
     loadChatBackupStorageStats,
@@ -14,6 +10,7 @@ import { buildTauriTavernSettingsUpdate } from './settings-patch.js';
 import { applyTauriTavernSettingsUpdateEffects } from './settings-effects.js';
 import { callTauriTavernPanelPopup, createTauriTavernPanelPopup } from '../panel-popup.js';
 import { setOledBackgroundEnabled } from '../oled-background.js';
+import { buildThumbnailUrl } from '../../../../tauri/main/context/asset-path-helpers.js';
 
 const SETTINGS_STYLE_ID = 'tauritavern-settings-style';
 
@@ -102,8 +99,7 @@ const HELP_TOPICS = {
     avatarPersonaOriginalImages: {
         title: 'Enable Character/User Avatar Original Images',
         lines: [
-            'Character/User avatar originals help: on',
-            'Character/User avatar originals help: off',
+            'When enabled, character/user avatars in chat load full-size images, and lists keep thumbnails. Takes effect after reload.',
         ],
     },
     oledBackground: {
@@ -154,10 +150,7 @@ function getBackgroundThumbnailUrl(filename, isAnimated) {
         return '/img/No-Image-Placeholder.svg';
     }
 
-    const url = typeof window.__TAURITAVERN_THUMBNAIL__ === 'function'
-        ? window.__TAURITAVERN_THUMBNAIL__('bg', filename)
-        : `/thumbnail?type=bg&file=${encodeURIComponent(filename)}`;
-    return isAnimated ? `${url}&static=true` : url;
+    return buildThumbnailUrl('bg', filename, { static: isAnimated });
 }
 
 async function readBackgroundOptions() {
@@ -336,28 +329,12 @@ async function confirmChatBackupHistoryPurge() {
 }
 
 async function chooseDataRoot() {
-    const picked = await openDialog({
-        directory: true,
-        multiple: false,
-        title: translate('Select Data Directory'),
-    });
-
-    const selected = Array.isArray(picked) ? picked[0] : picked;
-    const normalized = String(selected || '').trim();
-    if (!normalized) {
-        return null;
-    }
-
     const confirm = createPopupColumn();
     const title = document.createElement('b');
     title.textContent = translate('Change Data Directory');
     const hint = document.createElement('div');
     hint.textContent = translate('The app will migrate data on next startup. Restart is required.');
-    const pathPreview = document.createElement('pre');
-    pathPreview.style.margin = '0';
-    pathPreview.style.whiteSpace = 'pre-wrap';
-    pathPreview.textContent = normalized;
-    confirm.append(title, hint, pathPreview);
+    confirm.append(title, hint);
 
     const confirmation = await callGenericPopup(confirm, POPUP_TYPE.CONFIRM, '', {
         okButton: translate('Confirm'),
@@ -370,16 +347,27 @@ async function chooseDataRoot() {
         return null;
     }
 
-    await setDataRoot(normalized);
+    const selected = await pickDataRoot();
+    if (!selected) {
+        return null;
+    }
 
-    await callGenericPopup(translate('Data directory saved. Restart to apply.'), POPUP_TYPE.TEXT, '', {
+    const saved = createPopupColumn();
+    const message = document.createElement('div');
+    message.textContent = translate('Data directory saved. Restart to apply.');
+    const pathPreview = document.createElement('pre');
+    pathPreview.style.margin = '0';
+    pathPreview.style.whiteSpace = 'pre-wrap';
+    pathPreview.textContent = selected;
+    saved.append(message, pathPreview);
+    await callGenericPopup(saved, POPUP_TYPE.TEXT, '', {
         okButton: translate('OK'),
         allowVerticalScrolling: true,
         wide: false,
         large: false,
     });
 
-    return normalized;
+    return selected;
 }
 
 function createSettingsActions(backgroundOptions) {
