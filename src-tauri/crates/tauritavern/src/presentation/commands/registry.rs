@@ -120,6 +120,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::settings_commands::get_tauritavern_settings,
         super::settings_commands::get_chat_backup_storage_stats,
         super::settings_commands::update_tauritavern_settings,
+        super::settings_commands::set_keys_exposure,
         #[cfg(desktop)]
         super::runtime_paths_commands::get_runtime_paths,
         #[cfg(desktop)]
@@ -234,7 +235,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::lan_sync_commands::lan_sync_pair_device,
         super::lan_sync_commands::lan_sync_get_pairing_info,
         super::lan_sync_commands::lan_sync_request_pairing,
-        super::lan_sync_commands::lan_sync_confirm_pairing,
+        super::lan_sync_commands::lan_sync_review_pairing,
         super::lan_sync_commands::lan_sync_list_devices,
         super::lan_sync_commands::lan_sync_remove_device,
         super::lan_sync_commands::lan_sync_sync_from_device,

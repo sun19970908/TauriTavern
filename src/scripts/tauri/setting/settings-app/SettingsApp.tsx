@@ -51,6 +51,7 @@ type SettingsAppProps = {
     controller: SettingsController;
     capabilities: SettingsCapabilities;
     initialDataRoot: SettingsDataRootState | null;
+    initialKeysExposure: boolean;
     themeOptions: SettingsOption[];
     backgroundOptions: SettingsBackgroundOption[];
     currentBackground: string;
@@ -62,6 +63,7 @@ function SettingsApp({
     controller,
     capabilities,
     initialDataRoot,
+    initialKeysExposure,
     themeOptions,
     backgroundOptions,
     currentBackground,
@@ -70,6 +72,8 @@ function SettingsApp({
 }: SettingsAppProps) {
     const { draft, chatBackupStorageStats } = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
     const [appearanceOpen, setAppearanceOpen] = useState(false);
+    const [keysExposure, setKeysExposure] = useState(initialKeysExposure);
+    const [keysExposureBusy, setKeysExposureBusy] = useState(false);
 
     const chatBackupHistoryDisabled = isZeroLimit(draft.chatBackups.maxFilesPerPrefix)
         || isZeroLimit(draft.chatBackups.maxTotalFiles)
@@ -79,6 +83,18 @@ function SettingsApp({
     const showHelp = (topic: string) => {
         void actions.showHelp(topic);
     };
+
+    async function changeKeysExposure(allowed: boolean): Promise<void> {
+        setKeysExposureBusy(true);
+        try {
+            const stored = await actions.setKeysExposure(allowed);
+            if (typeof stored === 'boolean') {
+                setKeysExposure(stored);
+            }
+        } finally {
+            setKeysExposureBusy(false);
+        }
+    }
 
     function setChatBackupStorageUnit(value: string): void {
         const nextUnit: ChatBackupStorageUnit = value === 'GiB' ? 'GiB' : 'MiB';
@@ -321,9 +337,10 @@ function SettingsApp({
                     onHelp={showHelp}
                 >
                     <ToggleSwitch
-                        checked={draft.allowKeysExposure}
+                        checked={keysExposure}
+                        disabled={keysExposureBusy}
                         ariaLabel={tr('Allow Keys Exposure')}
-                        onChange={checked => controller.updateDraft('allowKeysExposure', checked)}
+                        onChange={checked => void changeKeysExposure(checked)}
                     />
                 </SettingRow>
 
@@ -411,6 +428,7 @@ export function mountTauriTavernSettingsApp(
                 controller={controller}
                 capabilities={options.viewModel.capabilities}
                 initialDataRoot={options.viewModel.dataRoot}
+                initialKeysExposure={options.viewModel.values.allowKeysExposure}
                 themeOptions={options.themeOptions ?? []}
                 backgroundOptions={options.backgroundOptions ?? []}
                 currentBackground={options.currentBackground ?? ''}

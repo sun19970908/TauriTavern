@@ -175,20 +175,20 @@ impl HttpClientPool {
     pub fn user_endpoint_client(
         &self,
         profile: HttpClientProfile,
-        base_url: &str,
+        url: &str,
     ) -> Result<Client, DomainError> {
-        self.user_endpoint_client_with_revision(profile, base_url)
+        self.user_endpoint_client_with_revision(profile, url)
             .map(|(client, _revision)| client)
     }
 
     pub fn user_endpoint_client_with_revision(
         &self,
         profile: HttpClientProfile,
-        base_url: &str,
+        url: &str,
     ) -> Result<(Client, u64), DomainError> {
         let route = {
             let state = self.state.read().unwrap();
-            user_endpoint_route(base_url, &state.user_endpoint_grants)?
+            user_endpoint_route(url, &state.user_endpoint_grants)?
         };
         self.client_with_revision_for_route(profile, Some(route))
     }
@@ -283,12 +283,12 @@ impl RequestProxyRuntime for HttpClientPool {
 }
 
 impl UserEndpointGrantRuntime for HttpClientPool {
-    fn allow_user_endpoints(&self, endpoints: &[String]) {
+    fn allow_user_endpoints(&self, origins: &[String]) {
         self.state
             .write()
             .unwrap()
             .user_endpoint_grants
-            .extend(endpoints.iter().cloned());
+            .extend(origins.iter().cloned());
     }
 }
 
@@ -355,9 +355,7 @@ fn build_profile_client(
     let mut builder = Client::builder().no_proxy();
 
     builder = match profile {
-        HttpClientProfile::Default => builder,
-        // Callers follow redirects themselves, so each URL can be allowed before it is requested.
-        HttpClientProfile::Download => builder.redirect(Policy::none()),
+        HttpClientProfile::Default | HttpClientProfile::Download => builder,
         HttpClientProfile::Tokenizer => builder
             .connect_timeout(TOKENIZER_CONNECT_TIMEOUT)
             .timeout(TOKENIZER_REQUEST_TIMEOUT),
@@ -371,7 +369,6 @@ fn build_profile_client(
             .http1_only()
             .connect_timeout(CHAT_COMPLETION_CONNECT_TIMEOUT),
         HttpClientProfile::ProviderAuthentication => builder
-            .redirect(Policy::none())
             .connect_timeout(PROVIDER_METADATA_CONNECT_TIMEOUT)
             .timeout(PROVIDER_METADATA_REQUEST_TIMEOUT),
         HttpClientProfile::ProviderMetadata => builder
@@ -389,16 +386,23 @@ fn build_profile_client(
         HttpClientProfile::Tts => builder
             .connect_timeout(TTS_CONNECT_TIMEOUT)
             .timeout(TTS_REQUEST_TIMEOUT),
-        HttpClientProfile::Mcp => builder
-            .redirect(Policy::none())
-            .connect_timeout(MCP_CONNECT_TIMEOUT),
+        HttpClientProfile::Mcp => builder.connect_timeout(MCP_CONNECT_TIMEOUT),
         // A proxied body streams for as long as the target keeps sending.
         HttpClientProfile::CorsProxy => builder.connect_timeout(CORS_PROXY_CONNECT_TIMEOUT),
     };
 
-    if user_endpoint_route.is_some() {
-        builder = builder.redirect(restricted_redirect_policy());
-    }
+    builder = match (profile, user_endpoint_route) {
+        // Download callers follow redirects themselves, so each URL can be allowed before it is
+        // requested; the other two never follow them. A user endpoint only narrows redirects.
+        (
+            HttpClientProfile::Download
+            | HttpClientProfile::ProviderAuthentication
+            | HttpClientProfile::Mcp,
+            _,
+        ) => builder.redirect(Policy::none()),
+        (_, Some(_)) => builder.redirect(restricted_redirect_policy()),
+        (_, None) => builder,
+    };
 
     if let Some(proxy) = proxy {
         builder = builder.proxy(proxy);
@@ -420,9 +424,10 @@ mod tests {
 
     use super::{HttpClientPool, HttpClientProfile};
     use rcgen::{CertifiedKey, generate_simple_self_signed};
-    use reqwest::StatusCode;
+    use reqwest::{StatusCode, Url};
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
+    use tt_domain::models::endpoint_url::http_origin;
     use tt_domain::models::settings::RequestProxySettings;
     use tt_ports::user_endpoint_access::UserEndpointGrantRuntime;
 
@@ -432,11 +437,9 @@ mod tests {
         HttpClientPool::new(TEST_USER_AGENT)
     }
 
-    fn grant_user_endpoint(pool: &HttpClientPool, endpoint: &str) {
-        let endpoint = tt_domain::models::endpoint_url::parse_user_http_endpoint(endpoint)
-            .unwrap()
-            .to_string();
-        pool.allow_user_endpoints(&[endpoint]);
+    fn grant_user_endpoint(pool: &HttpClientPool, url: &str) {
+        let origin = http_origin(&Url::parse(url).unwrap()).unwrap();
+        pool.allow_user_endpoints(&[origin]);
     }
 
     struct CaptureServer {
@@ -883,6 +886,34 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(first_request.starts_with("GET /start HTTP/1.1"));
         assert!(second_request.starts_with("GET /final HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn user_endpoints_keep_profiles_that_refuse_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect server");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let redirect_handle = thread::spawn(move || {
+            let (mut stream, _peer) = listener.accept().expect("accept redirect request");
+            read_request_head(&stream).expect("read redirect request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write redirect response");
+        });
+        let pool = pool();
+        grant_user_endpoint(&pool, &url);
+
+        let response = pool
+            .user_endpoint_client(HttpClientProfile::Mcp, &url)
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        redirect_handle.join().expect("redirect server thread");
     }
 
     #[tokio::test]
