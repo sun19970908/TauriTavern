@@ -1,6 +1,6 @@
 import { decodeBase64ToBytes } from '../binary-utils.js';
 import { jsonResponse, safeResponseStatusText } from '../http-utils.js';
-import { extractErrorText } from '../kernel/host-error-response.js';
+import { extractErrorText } from '../../../scripts/util/command-error-utils.js';
 import { readBridgeConfig, readBridgeCredentials } from '../services/plugin-bridge/bridge-config.js';
 
 /**
