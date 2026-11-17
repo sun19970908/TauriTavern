@@ -6693,7 +6693,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         let imageUrls = extractImagesFromData(data, requestContext);
         const reasoningSignature = extractReasoningSignatureFromData(data, requestContext);
         const native = data?.choices?.[0]?.message?.native ?? null;
-        const promptCache = getPromptCacheUsage(data?.usage);
+        const promptCache = getPromptCacheUsage({ ...data?.timings, ...data?.usage });
         const hasToolCalls = canPerformToolCalls && ToolManager.hasToolCalls(data);
         const providerReplay = requestContext ? { ...requestContext, text: getMessage } : null;
         kobold_horde_model = title;
@@ -9657,12 +9657,6 @@ async function applySettingsSnapshot(data, initLoaderHandle = null) {
 
         if (settings.main_api == 'poe') {
             settings.main_api = 'openai';
-        }
-
-        const iosCaps = getActiveIosPolicyCapabilities();
-        if (iosCaps && iosCaps.llm?.text_completions?.enabled === false && settings.main_api === 'textgenerationwebui') {
-            settings.main_api = 'openai';
-            globalThis.toastr?.warning?.('Text Completion is disabled by your iOS policy. Switched to Chat Completion.');
         }
 
         main_api = settings.main_api;

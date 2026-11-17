@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use reqwest::redirect::Policy;
-use reqwest::{Client, NoProxy, Proxy, Url};
+use reqwest::{Client, NoProxy, Proxy};
 use tt_domain::errors::DomainError;
 use tt_domain::models::settings::RequestProxySettings;
 use tt_ports::settings::RequestProxyRuntime;
@@ -16,8 +16,8 @@ use crate::restricted_endpoint::{
     UserEndpointRoute, restricted_redirect_policy, user_endpoint_route,
 };
 
-pub const CHAT_COMPLETION_CONNECT_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-pub const CHAT_COMPLETION_NON_STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+pub const GENERATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+pub const GENERATION_NON_STREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 pub const TOKENIZER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const TOKENIZER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PROVIDER_METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -40,8 +40,8 @@ pub enum HttpClientProfile {
     Default,
     Download,
     Tokenizer,
-    ChatCompletion,
-    ChatCompletionStream,
+    Generation,
+    GenerationStream,
     ChatCompletionWebSocket,
     ProviderAuthentication,
     ProviderMetadata,
@@ -293,39 +293,9 @@ impl UserEndpointGrantRuntime for HttpClientPool {
 }
 
 fn proxy_from_settings(settings: &RequestProxySettings) -> Result<Option<Proxy>, DomainError> {
-    if !settings.enabled {
+    let Some(proxy_url) = settings.proxy_url()? else {
         return Ok(None);
-    }
-
-    let url = settings.url.trim();
-    if url.is_empty() {
-        return Err(DomainError::InvalidData(
-            "Request proxy URL is required".to_string(),
-        ));
-    }
-
-    let proxy_url = Url::parse(url)
-        .ok()
-        .filter(Url::has_host)
-        .map_or_else(|| Url::parse(&format!("http://{url}")), Ok)
-        .map_err(|error| DomainError::InvalidData(format!("Invalid request proxy URL: {error}")))?;
-    if !matches!(
-        proxy_url.scheme(),
-        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
-    ) {
-        return Err(DomainError::InvalidData(
-            "Request proxy URL must use http, https, socks4, socks4a, socks5, or socks5h"
-                .to_string(),
-        ));
-    }
-    if !matches!(proxy_url.path(), "" | "/")
-        || proxy_url.query().is_some()
-        || proxy_url.fragment().is_some()
-    {
-        return Err(DomainError::InvalidData(
-            "Request proxy URL must not include a path, query, or fragment".to_string(),
-        ));
-    }
+    };
     let mut proxy = Proxy::all(proxy_url)
         .map_err(|error| DomainError::InvalidData(format!("Invalid request proxy URL: {error}")))?;
 
@@ -359,15 +329,15 @@ fn build_profile_client(
         HttpClientProfile::Tokenizer => builder
             .connect_timeout(TOKENIZER_CONNECT_TIMEOUT)
             .timeout(TOKENIZER_REQUEST_TIMEOUT),
-        HttpClientProfile::ChatCompletion => builder
-            .connect_timeout(CHAT_COMPLETION_CONNECT_TIMEOUT)
-            .timeout(CHAT_COMPLETION_NON_STREAM_REQUEST_TIMEOUT),
-        HttpClientProfile::ChatCompletionStream => {
-            builder.connect_timeout(CHAT_COMPLETION_CONNECT_TIMEOUT)
-        }
+        HttpClientProfile::Generation => builder
+            .connect_timeout(GENERATION_CONNECT_TIMEOUT)
+            .timeout(GENERATION_NON_STREAM_REQUEST_TIMEOUT),
+        // No read limit: a stream may pause between tokens, and a text completion model download
+        // answers only when it ends.
+        HttpClientProfile::GenerationStream => builder.connect_timeout(GENERATION_CONNECT_TIMEOUT),
         HttpClientProfile::ChatCompletionWebSocket => builder
             .http1_only()
-            .connect_timeout(CHAT_COMPLETION_CONNECT_TIMEOUT),
+            .connect_timeout(GENERATION_CONNECT_TIMEOUT),
         HttpClientProfile::ProviderAuthentication => builder
             .connect_timeout(PROVIDER_METADATA_CONNECT_TIMEOUT)
             .timeout(PROVIDER_METADATA_REQUEST_TIMEOUT),
@@ -629,11 +599,8 @@ mod tests {
         assert!(pool.git_blocking_client_builder().is_err());
         grant_user_endpoint(&pool, "http://localhost:11434/v1");
         assert!(
-            pool.user_endpoint_client(
-                HttpClientProfile::ChatCompletion,
-                "http://localhost:11434/v1"
-            )
-            .is_ok()
+            pool.user_endpoint_client(HttpClientProfile::Generation, "http://localhost:11434/v1")
+                .is_ok()
         );
 
         pool.apply_request_proxy_settings(&RequestProxySettings::default())
@@ -787,9 +754,7 @@ mod tests {
                 .expect("write second response");
             dead.join().expect("dead connection thread");
         });
-        let client = pool()
-            .client(HttpClientProfile::ChatCompletionStream)
-            .unwrap();
+        let client = pool().client(HttpClientProfile::GenerationStream).unwrap();
 
         client.get(&url).send().await.unwrap();
         client.get(&url).send().await.unwrap();
@@ -808,13 +773,13 @@ mod tests {
         })
         .unwrap();
         assert!(
-            pool.user_endpoint_client(HttpClientProfile::ChatCompletion, &origin.url)
+            pool.user_endpoint_client(HttpClientProfile::Generation, &origin.url)
                 .is_err()
         );
         grant_user_endpoint(&pool, &origin.url);
 
         let client = pool
-            .user_endpoint_client(HttpClientProfile::ChatCompletion, &origin.url)
+            .user_endpoint_client(HttpClientProfile::Generation, &origin.url)
             .unwrap();
         client.get(&origin.url).send().await.unwrap();
 
@@ -838,7 +803,7 @@ mod tests {
         grant_user_endpoint(&pool, endpoint);
 
         let client = pool
-            .user_endpoint_client(HttpClientProfile::ChatCompletion, endpoint)
+            .user_endpoint_client(HttpClientProfile::Generation, endpoint)
             .unwrap();
         client.get(endpoint).send().await.unwrap();
 
@@ -873,7 +838,7 @@ mod tests {
         let pool = pool();
         grant_user_endpoint(&pool, &base_url);
         let client = pool
-            .user_endpoint_client(HttpClientProfile::ChatCompletion, &base_url)
+            .user_endpoint_client(HttpClientProfile::Generation, &base_url)
             .unwrap();
 
         let response = client
@@ -933,7 +898,7 @@ mod tests {
         let pool = pool();
         grant_user_endpoint(&pool, &redirect_url);
         let client = pool
-            .user_endpoint_client(HttpClientProfile::ChatCompletion, &redirect_url)
+            .user_endpoint_client(HttpClientProfile::Generation, &redirect_url)
             .unwrap();
 
         let error = client.get(&redirect_url).send().await.unwrap_err();
