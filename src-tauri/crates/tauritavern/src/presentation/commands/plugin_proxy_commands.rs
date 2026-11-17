@@ -6,6 +6,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use tauri::{State, WebviewWindow};
+use url::Url;
 
 use crate::app::AppState;
 use crate::presentation::commands::helpers::log_command;
@@ -74,8 +75,11 @@ pub async fn plugin_proxy_request(
     log_command("plugin_proxy_request");
 
     let target = validate_target(&request)?;
+    let base_url = Url::parse(request.base_url.trim().trim_end_matches('/')).map_err(|error| {
+        CommandError::BadRequest(format!("Plugin bridge baseUrl is not a valid URL: {error}"))
+    })?;
     ensure_user_endpoint_access(
-        Some(request.base_url.trim().trim_end_matches('/').to_string()),
+        Some(&base_url),
         &locale,
         &window,
         &app_state.services.user_endpoint_access_service,
