@@ -33,6 +33,7 @@
 - WKWebView 上、左、右约束到宿主的内容 guide，底边约束到 `keyboardLayoutGuide.topAnchor`。键盘收起时 keyboard guide 停在底部安全区。
 - iOS 没有沉浸模式，政策避让就是内容 guide：平时等于安全区；有抽屉栏时页面没有顶栏，上边改用纵向角落适配的安全区（`safeAreaLayoutRegionWithCornerAdaptation:`），避开显示圆角。快照的 insets 读同一个 guide。
 - 内部 UIScrollView 保持 `contentInsetAdjustmentBehavior = .never` 与零 inset；WebKit 自己的焦点、选区与键盘处理照常运行。
+- 关闭 WebKit 的文字自动缩放（`_textAutosizingEnabled`），字号只由页面与用户设置决定。它在 WebView 宽于主屏竖放宽度时放大正文，横屏与 iPhone Duo 展开都满足这个条件。
 - 主窗口隐藏 WebKit 表单附属栏（`disableInputAccessoryView`）。收键盘手势由宿主内的全窗口 `KeyboardScrollView` 提供：UIKit `.interactive`，与网页内部滚动视图的 pan 同时识别，不取消内容触摸，网页控件操作与键盘跟手可以同时发生。容器没有滚动内容，`setContentOffset:` 固定为零，`alwaysBounceVertical` 只用来让 pan 能够开始。
 - WKWebView 是容器的子视图，约束对象仍是宿主的 guide。UIKit 在键盘动画块里一次设定 guide；交互拖动不同，guide 跟手变化，所以容器的 pan 活动期间 WebView 高度保持不变，松手后恢复跟随。iOS WebKit 把每次 WebView 尺寸变化当作样式表环境变化整文档重建样式，逐帧跟随的代价尤其高。
 - 宿主在 `layoutSubviews` 按值去重发布窗口快照。底色设在宿主视图上，条带是插在 WKWebView 之下的 UIImageView。
@@ -85,6 +86,7 @@
 - 只有高度变化的 resize（键盘）不触发与宽度相关的工作：上游 resize 处理器在移动宿主上早退，聊天虚拟化度量按宽度门控，Quick Reply 编辑器只在宽度变化时 blur/focus。movingUI 缩放按宿主身份 `isMobileHost()` 判断。
 - 聊天宽度：移动宿主且窗口竖屏时固定为 100%，滑块禁用；竖屏读窗口快照，不读视口。
 - 输入框聚焦（`src/scripts/chat-input-focus.js`）：移动宿主拒绝导航与恢复类聚焦，只在编辑意图下弹出键盘；Android 进入后台时让输入框失焦。
+- 输入区让位：移动宿主上，`#chat` 里的文本框持有焦点时（如编辑消息），`#form_sheld` 隐藏，键盘上方留给聊天。标记在 `chat-input-focus.js`，规则在 `style.css`。
 - 第一方弹窗用自身类名的普通 CSS 管理尺寸；聊天列表自己负责滚动。
 - 主题 CSS 按普通层叠生效，宿主不改写主题对第一方容器的几何。
 

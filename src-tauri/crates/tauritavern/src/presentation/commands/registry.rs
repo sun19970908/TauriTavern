@@ -343,7 +343,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::agent_commands::read_agent_run_checkpoint,
         super::agent_commands::resume_agent_run,
         super::agent_commands::finish_agent_run_presentation,
-        super::agent_commands::subscribe_agent_run_live_projection,
+        super::agent_live_projection::open_agent_run_live_projection,
+        super::agent_live_projection::stream_agent_run_live_projection,
         super::agent_commands::prepare_agent_prompt_assembly,
         super::agent_commands::build_agent_current_model_connection_snapshot,
         super::agent_commands::apply_agent_current_model_connection_snapshot,
@@ -401,6 +402,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::text_completion_commands::encode_text_completion_tokens,
         super::text_completion_commands::download_ollama_model,
         super::text_completion_commands::download_tabby_model,
+        // AI Horde commands
+        super::horde_commands::check_horde_status,
+        super::horde_commands::get_horde_text_workers,
+        super::horde_commands::get_horde_text_models,
+        super::horde_commands::get_horde_user_info,
+        super::horde_commands::start_horde_text_stream,
         // Generation commands shared by every API family
         super::generation_commands::read_generation_stream,
         super::generation_commands::close_generation_stream,
