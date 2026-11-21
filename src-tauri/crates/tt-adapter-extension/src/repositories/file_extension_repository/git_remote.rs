@@ -254,8 +254,17 @@ pub(super) fn remote_symbolic_target(remote_ref: &RemoteRef) -> Option<&[u8]> {
 }
 
 pub(super) fn open_embedded(path: &Path) -> Result<gix::Repository, DomainError> {
-    let repo = gix::open_opts(path, gix::open::Options::isolated().strict_config(true))
-        .map_err(|error| git_error("Failed to open embedded Git repository", error))?;
+    // Extension repositories are created and managed by the app itself. Their `.git` directories may
+    // be owned by another account after app data is migrated or restored, and gix would then treat the
+    // repository as untrusted and hide its local config (including `remote.origin`). Trust the managed
+    // repository explicitly while keeping `isolated()` so no environment or global config is read.
+    let repo = gix::open_opts(
+        path,
+        gix::open::Options::isolated()
+            .strict_config(true)
+            .with(gix::sec::Trust::Full),
+    )
+    .map_err(|error| git_error("Failed to open embedded Git repository", error))?;
     let expected_workdir = canonicalize(path, "extension worktree")?;
     let expected_git_dir = canonicalize(&path.join(".git"), "extension Git directory")?;
     let git_dir = canonicalize(repo.git_dir(), "embedded Git directory")?;
