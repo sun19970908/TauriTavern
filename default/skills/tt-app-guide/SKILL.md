@@ -50,14 +50,14 @@ Each top bar drawer is a `.drawer` holding a `.drawer-toggle` and a `.drawer-con
 Elsewhere:
 
 - **TauriTavern settings** open as a popup from `#tauritavern_settings_button`.
-  - Sections: Performance, Chat Backups, System (data directory, request proxy), Models, Misc and Development (logs, reload frontend). Windows adds Interface, and Sync appears when LAN sync is allowed.
+  - Sections: Interface (generation notifications; Windows adds minimize to tray on close), Performance, Chat Backups, System (data directory, request proxy), Models, Misc and Development (logs, reload frontend). Sync appears when LAN sync is allowed.
   - The controls have no stable ids. Find a section by its `aria-label` and a row by its label, both in the user's language.
   - Most changes take effect when the popup is saved, and some of those reload the page.
   - Some act at once: choosing a data directory (after its own confirmation), the Development buttons and Sync.
   - The data directory and the API key exposure option (Misc) need an app restart.
 - **Updates and the debug bundle.** They are in the TauriTavern version panel in the Extensions drawer, which is collapsed by default.
-  - The update channel is the radio group `input[name="tauritavern_update_channel"]` (`stable` or `canary`); `#ttv-channel-toggle` only expands it.
-  - The update check is `#tauritavern_check_update`, and the debug bundle export is `#tauritavern_export_debug_bundle`.
+  - `#ttv-update-settings-toggle` expands Update Settings, which holds the update channel radio group `input[name="tauritavern_update_channel"]` (`stable` or `canary`) and the startup update popup switch `#tauritavern_update_popup_enabled`.
+  - The manual update check is `#tauritavern_check_update`, and the debug bundle export is `#tauritavern_export_debug_bundle`.
   - iOS builds may hide the update controls.
 - **The extensions menu.** `#extensionsMenuButton`, next to the chat input, opens `#extensionsMenu`.
 
