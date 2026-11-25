@@ -292,7 +292,6 @@ export {};
  *   | 'tts_handle'
  *   | 'unassign_images_from_metadata_folder'
  *   | 'update_avatar'
- *   | 'update_character'
  *   | 'update_character_card_data'
  *   | 'update_extension'
  *   | 'update_group'
