@@ -6,6 +6,7 @@
   "packageManager": "pnpm@11.22.0",
   "scripts": {
     "tauri": "node scripts/tauri-app.mjs --prepare-frontend",
+    "remote": "node scripts/remote-host.mjs",
     "android": "node scripts/tauri-app.mjs --prepare-frontend android",
     "ohos": "node scripts/tauri-app.mjs --prepare-frontend ohos",
     "ios": "node scripts/tauri-app.mjs --prepare-frontend ios",

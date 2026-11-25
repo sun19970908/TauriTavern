@@ -86,6 +86,13 @@ async function initializeApplication() {
     }
 
     try {
+        // A browser without the native bridge is the remote host; install it before any app module reads the bridge.
+        const { hasTauri } = await importWithRetry('./tauri-bridge.js');
+        if (!hasTauri() && globalThis.location?.protocol !== 'tauri:') {
+            const { installRemoteWebHost } = await importWithRetry('./tauri/web-host/remote.js');
+            installRemoteWebHost();
+        }
+
         await window.__TAURITAVERN_DEV_SW_READY__;
 
         // lib.js statically imports ./dist/lib.core.bundle.js, so this guarantees

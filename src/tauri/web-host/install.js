@@ -5,7 +5,7 @@ import { createReadCommands } from './commands/read.js';
 import { createChatCommands } from './commands/chat.js';
 import { createResources } from './protocols/resources.js';
 import { createSettingsCommits } from './protocols/settings-commit.js';
-import { createBackend } from './backend.js';
+import { createAsyncBackend } from './backend.js';
 import { createChatCommits } from './protocols/chat-commit.js';
 import { createWorldInfoCommits } from './protocols/world-info-commit.js';
 import { createWriteCommands } from './commands/write.js';
@@ -19,9 +19,10 @@ import { TAURI_GRACEFUL_EXIT_EVENT } from '../main/services/lifecycle/lifecycle-
  * @typedef {{ kind: 'form', entries: [string, string][] }} FormEntries
  * @typedef {{ method: string, url: string, headers: Record<string, string>, body: string | FormEntries | null }} BackendRequest
  * @typedef {{ status: number, headers: Record<string, string>, body: string | ReadableStream<Uint8Array> | null }} BackendResponse
+ * @typedef {{ handle: (request: BackendRequest) => BackendResponse | Promise<BackendResponse> }} WebHostBackend
  * @typedef {{
  *   identity: import('../../scripts/util/host-identity.js').HostIdentity,
- *   backend: { handle: (request: BackendRequest) => BackendResponse },
+ *   backend: WebHostBackend,
  *   store: { load: () => Record<string, any> | null, save: (value: Record<string, any>) => void },
  * }} WebHostOptions
  * @typedef {Record<string, (args: any, options: any) => any>} CommandHandlers
@@ -47,7 +48,7 @@ export function installWebHost({ identity, backend, store }) {
         save: value => store.save({ ...store.load(), [name]: value }),
     });
     const settings = createSettings(part('settings'), async () => (await loadDefaults()).settings);
-    const st = createBackend(backend);
+    const st = createAsyncBackend(backend);
     const resources = createResources();
     /** @type {CommandHandlers} */
     const commands = {

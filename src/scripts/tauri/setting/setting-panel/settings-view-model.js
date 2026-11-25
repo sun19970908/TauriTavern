@@ -1,6 +1,6 @@
 // @ts-check
 
-import { hostPlatform, isDesktopHost } from '../../../util/host-identity.js';
+import { hostPlatform, isDesktopHost, isRemoteWebHost } from '../../../util/host-identity.js';
 import {
     getChatBackupStorageStats,
     getGenerationNotificationState,
@@ -16,7 +16,7 @@ import { createDataRootState, createTauriTavernSettingsState } from './settings-
  */
 export function resolveTauriTavernSettingsCapabilities(notificationState) {
     const iosCaps = getActiveIosPolicyCapabilities();
-    const supportsDataRootSelection = isDesktopHost();
+    const supportsDataRootSelection = isDesktopHost() && !isRemoteWebHost();
 
     return {
         requestProxyAllowed: iosCaps?.network?.request_proxy !== false,

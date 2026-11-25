@@ -7,11 +7,13 @@ declare var __TAURITAVERN_HOST__: Readonly<import('./scripts/util/host-identity.
 interface Window {
     // Tauri globals
     __TAURI__?: any;
+    __TAURI_INTERNALS__?: any;
     __TAURI_RUNNING__?: boolean;
     __TAURITAVERN_HOST__?: Readonly<import('./scripts/util/host-identity.js').HostIdentity>;
 
     __TAURITAVERN_MAIN_READY__?: Promise<void>;
     __TAURITAVERN_DEV_SW_READY__?: Promise<void>;
+    __TAURITAVERN_REMOTE__?: { baseUrl: string };
 
     // TauriTavern host contract (public globals)
     __TAURITAVERN__?: TauriTavernHostAbi;

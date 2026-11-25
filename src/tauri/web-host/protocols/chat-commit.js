@@ -3,7 +3,7 @@ import { createByteCommits } from './byte-commit.js';
 import { characterAvatarFileNameFromStem } from '../../main/services/characters/character-identity.js';
 import { readChatRecords } from '../commands/chat.js';
 
-/** @param {ReturnType<import('../backend.js').createBackend>} backend @returns {import('../install.js').CommandHandlers} */
+/** @param {ReturnType<import('../backend.js').createAsyncBackend>} backend @returns {import('../install.js').CommandHandlers} */
 export function createChatCommits(backend) {
     const { request } = backend;
     const commits = createByteCommits();
@@ -15,10 +15,10 @@ export function createChatCommits(backend) {
             return commits.begin({ target, operation });
         },
         append_chat_commit_chunk: commits.append,
-        finish_chat_commit: args => {
+        finish_chat_commit: async args => {
             const { metadata: { target, operation }, text } = commits.finish(args);
             const address = { avatar_url: characterAvatarFileNameFromStem(target.characterId), file_name: target.fileName };
-            const current = readChatRecords(backend, address);
+            const current = await readChatRecords(backend, address);
             const integrity = current?.[0]?.chat_metadata?.integrity;
             let chat;
             let force = false;
@@ -47,7 +47,7 @@ export function createChatCommits(backend) {
             if (!force && integrity != null && integrity !== chat[0]?.chat_metadata?.integrity) {
                 throw { BadRequest: 'integrity' };
             }
-            request('/api/chats/save', JSON.stringify({ ...address, chat, force }));
+            await request('/api/chats/save', JSON.stringify({ ...address, chat, force }));
         },
         abort_chat_commit: commits.abort,
     };

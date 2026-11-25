@@ -2,13 +2,13 @@
 import { characterAvatarFileNameFromStem } from '../../main/services/characters/character-identity.js';
 import { readCharacter } from './read.js';
 
-/** @param {ReturnType<import('../backend.js').createBackend>} backend @returns {import('../install.js').CommandHandlers} */
+/** @param {ReturnType<import('../backend.js').createAsyncBackend>} backend @returns {import('../install.js').CommandHandlers} */
 export function createWriteCommands(backend) {
     const { request } = backend;
     return {
-        save_theme: ({ dto }) => { request('/api/themes/save', JSON.stringify(dto)); },
-        save_quick_reply_set: ({ payload }) => { request('/api/quick-replies/save', JSON.stringify(payload)); },
-        update_character_card_data: ({ name, dto }) => {
+        save_theme: async ({ dto }) => { await request('/api/themes/save', JSON.stringify(dto)); },
+        save_quick_reply_set: async ({ payload }) => { await request('/api/quick-replies/save', JSON.stringify(payload)); },
+        update_character_card_data: async ({ name, dto }) => {
             if (dto.avatar_path != null || dto.crop != null) throw { Unsupported: 'Web Host does not edit character avatars' };
             const card = JSON.parse(dto.card_json);
             const data = card.data;
@@ -30,11 +30,11 @@ export function createWriteCommands(backend) {
                 if (value !== undefined) entries.push([key, String(value)]);
             }
             for (const greeting of data.alternate_greetings ?? []) entries.push(['alternate_greetings', greeting]);
-            request('/api/characters/edit', { kind: 'form', entries });
+            await request('/api/characters/edit', { kind: 'form', entries });
             return readCharacter(backend, name);
         },
-        merge_character_card_data: ({ name, dto }) => {
-            request('/api/characters/merge-attributes', JSON.stringify({ ...JSON.parse(dto.update_json), avatar: characterAvatarFileNameFromStem(name) }));
+        merge_character_card_data: async ({ name, dto }) => {
+            await request('/api/characters/merge-attributes', JSON.stringify({ ...JSON.parse(dto.update_json), avatar: characterAvatarFileNameFromStem(name) }));
             return readCharacter(backend, name);
         },
     };
