@@ -1,7 +1,7 @@
 import { installWindowLayout } from '../../scripts/util/window-layout.js';
 import { installWindowBackdrop } from '../../scripts/window-backdrop.js';
 import { installDrawerBar } from '../../scripts/drawer-bar.js';
-import { invoke } from '../../tauri-bridge.js';
+import { invoke, isNativeTauri } from '../../tauri-bridge.js';
 import { eventSource, event_types } from '../../scripts/events.js';
 import { createTauriMainContext } from './context.js';
 import { createDownloadBridge } from './download-bridge.js';
@@ -38,6 +38,7 @@ import { installMcpApi } from './api/mcp.js';
 import { installSkillApi } from './api/skill.js';
 import { installWorldInfoApi } from './api/world-info.js';
 import { initializeTauriIntegration } from './bootstrap/initialize-tauri-integration.js';
+import { installRemoteBridge } from './services/remote-bridge/install.js';
 import {
     getMethod,
     getMethodHint,
@@ -283,12 +284,25 @@ export function bootstrapTauriMain() {
 
     const nextTraceId = createTraceIdFactory('req');
 
+    const isRemoteWebHost = Boolean(globalThis.__TAURITAVERN_REMOTE__);
+
     const canHandleRequest = (url, input, init, targetWindow = window) => {
         if (!url || url.origin !== getWindowOrigin(targetWindow)) {
             return false;
         }
 
         const method = getMethodHint(input, init);
+        // Native-only routes that read or mutate the desktop filesystem: recent
+        // chat summaries, preset persistence, and extension discovery/install/
+        // update/delete. The browser Web Host has no equivalent commands, so let
+        // the remote Node entrance relay them to the desktop app's native handlers.
+        if (isRemoteWebHost && (
+            url.pathname === '/api/chats/recent'
+            || url.pathname.startsWith('/api/presets/')
+            || url.pathname.startsWith('/api/extensions/')
+        )) {
+            return false;
+        }
         return router.canHandle(method, url.pathname);
     };
 
@@ -383,6 +397,10 @@ export function bootstrapTauriMain() {
     };
     window.__TAURITAVERN_MAIN_READY__ = readyPromise;
     window.__TAURITAVERN__.ready = readyPromise;
+
+    if (isNativeTauri() && isDesktopHost()) {
+        runAfterTauriReady(() => installRemoteBridge({ fetchImpl: window.fetch.bind(window) }));
+    }
 
     runAfterTauriReady(() => setFrontendLogBackendForwardingEnabled(true));
     runAfterTauriReady(() => {

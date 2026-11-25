@@ -15,3 +15,4 @@ function identity() {
 export function hostPlatform() { return identity().platform; }
 export function isMobileHost() { return identity().kind === 'mobile'; }
 export function isDesktopHost() { return identity().kind === 'desktop'; }
+export function isRemoteWebHost() { return Boolean(globalThis.__TAURITAVERN_REMOTE__); }

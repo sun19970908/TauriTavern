@@ -43,6 +43,24 @@ for (const identity of [HOSTS.windows, HOSTS.android]) {
     });
 }
 
+test('Web Host starts the app through an asynchronous backend', async () => {
+    const { window, load, startHost, close } = await createFrontend({ identity: HOSTS.android, asyncBackend: true });
+    const { errors, failed } = captureBrowserErrors(window);
+    try {
+        await startHost();
+        await load('script.js');
+        const { eventSource, event_types } = (await load('scripts/events.js'));
+        const ready = new Promise(resolve => eventSource.once(event_types.APP_READY, resolve));
+        const chatLoaded = new Promise(resolve => eventSource.once(event_types.CHAT_LOADED, resolve));
+        window.jQuery.holdReady(false);
+        await Promise.race([Promise.all([ready, chatLoaded]), failed]);
+        expect(window.document.querySelector('#chat .mes_text').textContent).toMatch(/A chat loaded through Web Host/);
+        expect(errors).toEqual([]);
+    } finally {
+        close();
+    }
+});
+
 test('Web Host distinguishes a missing chat from an empty chat file', async () => {
     const { window, fixture, load, close } = await createFrontend();
     onTestFinished(close);

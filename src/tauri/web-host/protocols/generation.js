@@ -9,7 +9,7 @@ import { commandErrorForStatus } from '../../../scripts/util/command-error-utils
  */
 
 /**
- * @param {ReturnType<import('../backend.js').createBackend>} backend
+ * @param {ReturnType<import('../backend.js').createAsyncBackend>} backend
  * @param {ReturnType<import('../settings.js').createSettings>} settings
  * @returns {import('../install.js').CommandHandlers}
  */
@@ -45,7 +45,7 @@ export function createGenerationCommands({ json, request }, settings) {
         // Imported on first use: the upstream parser pulls in power-user.js, an app module that must load after init.js.
         const { default: EventSourceStream } = await import('../../../scripts/sse-stream.js');
         if (sessions.has(streamId)) throw { Conflict: `Generation stream already exists: ${streamId}` };
-        const { body } = request(url, JSON.stringify(dto));
+        const { body } = await request(url, JSON.stringify(dto));
         if (body === null || typeof body === 'string') throw new Error('Streaming generation requires a ReadableStream body');
         const reader = (/** @type {ReadableStream<BufferSource>} */ (body)).pipeThrough(new EventSourceStream()).getReader();
         sessions.set(streamId, { reader, seq: 0, cursor: -1, status: 'running', batch: undefined });
@@ -70,8 +70,8 @@ export function createGenerationCommands({ json, request }, settings) {
         get_chat_completions_status: ({ dto }) => json('/api/backends/chat-completions/status', dto),
         generate_chat_completion: ({ dto }) => json('/api/backends/chat-completions/generate', dto),
         start_chat_completion_stream: ({ streamId, dto }) => start(streamId, '/api/backends/chat-completions/generate', dto),
-        get_text_completions_status: ({ dto }) => {
-            const response = request('/api/backends/text-completions/status', JSON.stringify(dto));
+        get_text_completions_status: async ({ dto }) => {
+            const response = await request('/api/backends/text-completions/status', JSON.stringify(dto));
             if (typeof response.body !== 'string') {
                 throw new Error('POST /api/backends/text-completions/status: expected a JSON response');
             }
@@ -80,8 +80,8 @@ export function createGenerationCommands({ json, request }, settings) {
             return { result, data, supports_tokenization };
         },
         get_text_completions_props: ({ dto }) => json('/api/backends/text-completions/props', dto),
-        generate_text_completion: ({ dto }) => {
-            const completion = json('/api/backends/text-completions/generate', dto);
+        generate_text_completion: async ({ dto }) => {
+            const completion = await json('/api/backends/text-completions/generate', dto);
             // SillyTavern answers a failed generation with 200 and this shape.
             if (completion?.error === true) {
                 const message = typeof completion.response === 'string' ? completion.response.trim() : '';

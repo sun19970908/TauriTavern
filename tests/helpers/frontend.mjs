@@ -102,7 +102,7 @@ export function captureBrowserErrors(window) {
 
 // The fixture is the backend: it lives in the test page and outlives application frames, as the native host
 // outlives a WebView reload.
-export async function createFrontend({ identity = HOSTS.windows, fixture } = {}) {
+export async function createFrontend({ identity = HOSTS.windows, fixture, asyncBackend = false } = {}) {
     const frame = document.createElement('iframe');
     frame.src = '/__test/frontend.html';
     const loaded = new Promise(resolve => frame.addEventListener('load', resolve, { once: true }));
@@ -119,6 +119,10 @@ export async function createFrontend({ identity = HOSTS.windows, fixture } = {})
         const response = await fetch('/__test/frontend-content.json');
         const { settings, theme, extensions } = await response.json();
         fixture = createWebHostFixture(settings, theme, [...extensions, { name: 'third-party/web-host-fixture', type: 'local' }]);
+    }
+    if (asyncBackend) {
+        const handle = fixture.backend.handle.bind(fixture.backend);
+        fixture.backend.handle = async request => handle(request);
     }
     const { installWebHost } = await load('tauri/web-host/install.js');
     const host = installWebHost({ identity, backend: fixture.backend, store: fixture.store });

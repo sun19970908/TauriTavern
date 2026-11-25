@@ -8,6 +8,15 @@ function getTauri() {
     return window.__TAURI__ || null;
 }
 
+export function hasTauri() {
+    return getTauri() !== null;
+}
+
+/** The native IPC bridge; the Web Host only provides `__TAURI__`. */
+export function isNativeTauri() {
+    return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
+}
+
 function isPlainObject(value) {
     if (Object.prototype.toString.call(value) !== '[object Object]') {
         return false;

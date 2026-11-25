@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @param {ReturnType<import('../backend.js').createBackend>} backend
+ * @param {ReturnType<import('../backend.js').createAsyncBackend>} backend
  * @param {typeof fetch} fetchResource
  * @param {() => Promise<any>} loadDefaults
  * @returns {import('../install.js').CommandHandlers}
@@ -14,7 +14,7 @@ export function createExtensionCommands({ json, send }, fetchResource, loadDefau
         return response.text();
     }
     return {
-        get_extensions: () => json('/api/extensions/discover', undefined, 'GET').map(/** @param {{ name: string, type: string }} extension */ extension => ({
+        get_extensions: async () => (await json('/api/extensions/discover', undefined, 'GET')).map(/** @param {{ name: string, type: string }} extension */ extension => ({
             name: extension.name, extension_type: extension.type.charAt(0).toUpperCase() + extension.type.slice(1),
         })),
         read_frontend_template: ({ name }) => readTemplate(`/scripts/templates/${name}`),
@@ -25,8 +25,8 @@ export function createExtensionCommands({ json, send }, fetchResource, loadDefau
         register_agent_extension_tool: () => undefined,
         list_sprites: ({ dto }) => json(`/api/sprites/get?name=${encodeURIComponent(dto.name)}`, undefined, 'GET'),
         // Like native, failed statuses are returned for the SD extension to handle.
-        sd_handle: ({ path, body }) => {
-            const response = send(`/api/sd/${path}`, JSON.stringify(body));
+        sd_handle: async ({ path, body }) => {
+            const response = await send(`/api/sd/${path}`, JSON.stringify(body));
             const text = /** @type {string | null} */ (response.body);
             if (!text) return { status: response.status, kind: 'empty', body: null };
             return response.headers['content-type']?.includes('json')

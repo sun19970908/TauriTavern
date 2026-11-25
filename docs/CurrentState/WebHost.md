@@ -1,6 +1,6 @@
 # Web Host
 
-Web Host 是给浏览器嵌入方用的 TT 宿主实现，位于 `src/tauri/web-host/`。原生应用里由 Tauri 提供的那一侧，即 `window.__TAURI__` 与宿主身份 `__TAURITAVERN_HOST__`，在浏览器里由它提供。目前唯一的使用方是 [Tavern Studio](https://github.com/Darkatse/TavernStudio)，它在预览中运行 TT 前端。原生应用不加载这些文件。契约等级为 Project Contract。
+Web Host 是给浏览器嵌入方用的 TT 宿主实现，位于 `src/tauri/web-host/`。原生应用里由 Tauri 提供的那一侧，即 `window.__TAURI__` 与宿主身份 `__TAURITAVERN_HOST__`，在浏览器里由它提供。使用方是 [Tavern Studio](https://github.com/Darkatse/TavernStudio)，以及 `src/init.js` 在浏览器没有原生桥时加载的远程入口。原生应用不加载这些文件。契约等级为 Project Contract。
 
 ## 平时开发不用考虑它
 
@@ -28,7 +28,7 @@ import { installWebHost } from '/tauri/web-host/install.js';
 
 const host = installWebHost({
     identity: { platform: 'windows', kind: 'desktop' },
-    backend: { handle(request) { /* 同步返回 ST HTTP 响应 */ } },
+    backend: { handle(request) { /* 返回 ST HTTP 响应，或返回 Promise */ } },
     store: {
         load() { /* 同步返回之前保存的文档，第一次为 null */ },
         save(value) { /* 同步保存文档 */ },
@@ -38,16 +38,38 @@ const host = installWebHost({
 
 - 在 `init.js` 之前调用。调用返回时，`window.__TAURI__` 与冻结的宿主身份都已就绪。`identity` 只能是真实平台，取值与原生相同。
 - TT 页面可以运行在嵌入方的 iframe 里。
-- 三个端口都同步返回：
-  - `backend.handle({ method, url, headers, body })` 按 ST 的 HTTP 语义处理请求，返回 `{ status, headers, body }`：
-    - JSON 请求与响应使用字符串，GET 的请求体为 `null`；
-    - 角色编辑使用纯数据表单 `{ kind: 'form', entries: [name, value][] }`，只传文本字段；
-    - 流式响应见“生成流”；
-    - 非 2xx 响应会变成错误，错误信息包含方法、路径、状态码和响应体，所以这时的 `body` 必须是字符串。
-  - `store.load()` 与 `store.save(value)` 读写 Web Host 自己的一份文档，里面按名称分别存放 TT 设置、扩展存储条目与 MCP 注册。嵌入方原样保存它，不需要理解其内容。
+- `backend.handle({ method, url, headers, body })` 按 ST 的 HTTP 语义处理请求，返回 `{ status, headers, body }`，或返回解析为该响应的 Promise。安装入口统一经异步适配器 `createAsyncBackend` 调用它，因此同步与异步后端共用同一套命令实现：
+  - JSON 请求与响应使用字符串，GET 的请求体为 `null`；
+  - 角色编辑使用纯数据表单 `{ kind: 'form', entries: [name, value][] }`，只传文本字段；
+  - 流式响应见“生成流”；
+  - 非 2xx 响应会变成错误，错误信息包含方法、路径、状态码和响应体，所以这时的 `body` 必须是字符串。
+- `backend.handle` 返回异步响应时，一个命令内的多次后端调用之间会让出事件循环；Web Host 不额外串行化这些调用。单页面使用与原先相同；需要跨页面并发写时由嵌入方自行串行化。
+- `store.load()` 与 `store.save(value)` 仍同步读写 Web Host 自己的一份文档，里面按名称分别存放 TT 设置、扩展存储条目与 MCP 注册。嵌入方原样保存它，不需要理解其内容。
 - 后端数据和 `store` 都归嵌入方所有。页面模板与 `default-state.json` 按静态文件读取，嵌入方需原样提供 vendor 镜像中的这些文件。
 - 返回的 `host.emit(name, payload)` 向 `__TAURI__.event.listen` 注册的监听器投递事件，回调收到的形状与 Tauri 相同：`{ event, id, payload }`。
 - 移除页面前先 `await host.exit()`。它走原生关闭窗口的流程：TT 保存设置与聊天后调用 `getCurrentWindow().destroy()`，Promise 随之完成。保存失败时 TT 记录错误并保持页面打开，Promise 保持等待，再次调用即重试。
+
+## 浏览器远程入口
+
+`src/init.js` 在浏览器没有原生桥、且页面不在 `tauri:` 协议下时，先加载 `tauri/web-host/remote.js` 安装 Web Host，再加载应用模块。原生 Tauri 和已经自行安装 Web Host 的嵌入方不会进入这条路径。
+
+- `remote.js` 安装宿主身份、`backend` 与 `store`。身份按浏览器 UA 推断；`store` 存在 `localStorage` 的 `tauritavern:remote:web-host` 键。
+- 后端地址依次取 `?backend=<http(s) URL>`、`localStorage` 的 `tauritavern:remote:backend`、页面同源地址。页面不是 http(s) 来源时必须用前两种方式之一。
+- `remote-backend.js` 的 `createHttpBackend` 把 Web Host 的 backend 请求转成 `fetch`：JSON 字符串原样发送，角色编辑的文本表单转成 `FormData`，SSE 响应保留 `ReadableStream`，非文本响应按二进制读取。
+- 这个入口只提供浏览器侧的宿主实现，不包含 PC 端的 ST HTTP/SSE 服务；PC 后端需要按 Web Host 的 backend 契约提供对应端点。
+
+## PC 局域网入口
+
+PC 侧由两个进程组成，都不替代 Rust 后端：
+
+- `pnpm remote` 启动 `scripts/remote-host.mjs`，默认监听 `0.0.0.0:8787`，把 `src/` 当作静态目录服务给手机。`/api/...`、`/version`、`/thumbnail`、`/css/user.css`、`/scripts/extensions/third-party/...`、角色与背景图片路径以及少量旧聊天路径进入桥接队列，其余请求按静态文件处理。
+- 原生桌面应用在 Tauri 就绪后启动 `src/tauri/main/services/remote-bridge/install.js`。它轮询 `http://127.0.0.1:8787/__remote/poll`，拿到请求后调用现有的 patched `window.fetch`，因此仍然走 `tauri/main` 的 `routeRequest` 和原生命令。
+- `/__remote/response` 接收完整响应体：文本直接发送，图片等非文本响应按 base64 发送，Node 解码后返回给手机；`/__remote/chunk` 继续承载 SSE 分块。`/__remote/status` 只用于排查，不是业务接口。
+- 远程页面里的 `tauri/main/bootstrap.js` 对 `/api/chats/recent`、`/api/presets/*` 和 `/api/extensions/*` 不做本地路由，而是交给 Node 转给桌面原生处理器：最近聊天、预设保存需要原生文件命令，扩展管理需要 PC 文件系统的安装/更新/Git 操作。第三方扩展的 `manifest.json`、JS、CSS、模板及图片仍经 Node 转发到 Tauri `HostResourceService`，由后者按 local 优先于 global 的顺序读取 `data/default-user/extensions` 与 `data/extensions/third-party`。
+- TauriTavern 设置弹窗可在远程页面打开；数据根目录选择依赖原生命令，只在桌面原生宿主显示，远程宿主隐藏该项。
+- 桥接只负责传输，不读聊天文件、不实现业务逻辑，也不新增保存 FIFO。聊天保存仍由前端 `enqueueChatSave` 串行化，Rust 仍按聊天文件加锁。
+- 手机打开 `http://<PC 局域网 IP>:8787/`。`src/init.js` 发现没有原生桥后安装远程 Web Host，backend 默认指向页面同源地址，于是请求经由 Node 回到 PC 前端。
+- 当前不处理认证、多手机并发和端口发现；Node 与 PC 应用需在同一个用户会话中运行。端口冲突时用 `node scripts/remote-host.mjs --port <port>` 启动，并通过 `?backend=http://<PC-IP>:<port>` 打开页面。
 
 ## 命令
 
@@ -67,7 +89,7 @@ const host = installWebHost({
 | `open_chat_payload_jsonl`、`read_bytes`、`plugin:resources\|close` | `/api/chats/get`，见"聊天读取" |
 | `list_active_agent_runs` | 返回空集合，浏览器宿主不拥有原生 Agent Run |
 | `get_all_backgrounds`、`get_background_folders`、`get_all_background_metadata` | `/api/backgrounds/all`、`/api/backgrounds/folders`、`/api/image-metadata/all` |
-| `get_extensions` | `GET /api/extensions/discover`，把 ST 的 `type` 转回原生 `extension_type` |
+| `get_extensions` | 仍映射 `GET /api/extensions/discover`，把 ST 的 `type` 转回原生 `extension_type`；远程页面现已绕过该命令，扩展发现直接走 PC 原生路由 |
 | `read_frontend_template`、`read_frontend_extension_template` | 读取页面的模板与系统扩展模板 |
 | `open_extension_store_entry`、`read_bytes`；`begin_extension_store_commit`、`append_extension_store_commit_chunk`、`finish_extension_store_commit`、`abort_extension_store_commit` | 读取与 `setJson` 写入 `store` 文档里的 JSON 条目，读取分块与原生相同 |
 | `list_agent_profiles` | Rust 生成的默认 Writer 列表 |
@@ -106,7 +128,8 @@ const host = installWebHost({
 ## 实现要点
 
 **设置提交**
-- revision 是后端当前设置字符串的 SHA-256。比较 revision 与写入在同一次同步调用里完成；两个页面先后基于同一版本保存时，后到的一方收到 `{ Conflict: message }`。
+- revision 由后端决定：`get_sillytavern_settings` 原样保留 `/api/settings/get` 返回的 `tauritavern_settings_revision`（Rust 的分节 SHA-256）；只有后端没有该字段时，才回退到 Web Host 自己按设置字符串计算的 SHA-256。`finish_settings_commit` 同样原样返回 `/api/settings/save` 响应里的 revision，不能再用 Web Host 算法覆盖，否则下一次保存会拿错 revision 并 409。
+- `finish_settings_commit` 先读取当前 revision、检查后写入；不额外串行化并发提交，单页面顺序调用时行为与原先相同，后到且基于旧版本的保存仍会收到 `{ Conflict: message }`。
 - 提交里的 `power_user.personas` 与 `persona_descriptions` 只包含有变化的 Persona，没有提到的不表示删除。Web Host 保留后端里其余的 Persona，用提交的记录整条替换对应的 ID，再保存完整的 ST 设置。Persona 与 ST 设置之间的转换和前端共用 `tauri/main/kernel/persona-projection.js`。
 - 分块编码与原生相同：Android 用 `chunk-encoding: base64`，其他平台直接传字节。协议常量与内核共用 `tauri/main/kernel/byte-protocol.js`。
 - 设置、聊天、世界书与扩展存储共用 `protocols/byte-commit.js` 的分块会话机制。
@@ -121,7 +144,7 @@ const host = installWebHost({
 
 **系统扩展**。启动时写下的状态（MCP 注册、扩展存储条目）保存在 `store` 文档里，之后的启动读到的与原生相同；技能列表是全新安装的结果。工具声明确认接收；真正使用这些能力时才拒绝。
 
-**生成流**。后端同步返回响应头，`body` 是 `ReadableStream<Uint8Array>`，内容为标准 SSE。该流是可转移对象；同源调用可直接返回它，经结构化克隆转交时必须把流加入 transfer list。取消和关闭通过 reader 的 `cancel()` 传回后端。
+**生成流**。后端返回（或经 Promise 解析为）响应头，`body` 是 `ReadableStream<Uint8Array>`，内容为标准 SSE。该流是可转移对象；同源调用可直接返回它，经结构化克隆转交时必须把流加入 transfer list。取消和关闭通过 reader 的 `cancel()` 传回后端。
 
 SSE 解析使用上游 `scripts/sse-stream.js`。每次读取一个事件，保留尚未确认的批次；相同 `afterSeq` 重放该批次，包括尚在阻塞的读取。结束和错误产生终止事件，关闭流释放阻塞读取。
 

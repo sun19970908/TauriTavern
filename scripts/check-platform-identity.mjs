@@ -10,10 +10,13 @@ const HOST_IDENTITY_OWNERS = new Set([IDENTITY, 'src/tauri/web-host/install.js']
 const FRONTEND_DOC = 'docs/FrontendGuide.md §2.1（宿主身份）';
 const BACKEND_DOC = 'docs/BackendStructure.md §6.4（平台事实）';
 // These own browser compatibility or diagnostics, not native host identity.
+// The remote Web Host runs without Rust or the native bridge, so its browser
+// adapter has to derive the initial host identity from the browser itself.
 const BROWSER_READERS = new Set([
     'src/scripts/RossAscends-mods.js',
     'src/scripts/browser-fixes.js',
     'src/tauri/main/perf/perf-hud.js',
+    'src/tauri/web-host/remote-backend.js',
 ]);
 const CATEGORIES = { mobile: ['android', 'ios', 'ohos'], desktop: ['windows', 'macos', 'linux'] };
 const contract = rustTokens(readFileSync(path.join(ROOT, 'src-tauri/crates/tt-contracts/src/host.rs'), 'utf8'));

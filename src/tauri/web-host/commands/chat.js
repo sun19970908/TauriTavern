@@ -1,9 +1,9 @@
 // @ts-check
 import { characterAvatarFileNameFromStem } from '../../main/services/characters/character-identity.js';
 
-/** Read ST's records-or-missing response once for both reads and commits. @param {ReturnType<import('../backend.js').createBackend>} backend @param {any} address */
-export function readChatRecords({ json }, address) {
-    const payload = json('/api/chats/get', address);
+/** Read ST's records-or-missing response once for both reads and commits. @param {ReturnType<import('../backend.js').createAsyncBackend>} backend @param {any} address */
+export async function readChatRecords({ json }, address) {
+    const payload = await json('/api/chats/get', address);
     if (Array.isArray(payload)) return payload;
     if (payload !== null && typeof payload === 'object' && Object.keys(payload).length === 0) return null;
     throw new Error(`Invalid chat payload for ${address.avatar_url}/${address.file_name}: expected records or {}`);
@@ -12,13 +12,13 @@ export function readChatRecords({ json }, address) {
 /** The native chat read chunk. */
 const READ_CHUNK_BYTES = 4 * 1024 * 1024;
 
-/** @param {ReturnType<import('../backend.js').createBackend>} backend @param {ReturnType<import('../protocols/resources.js').createResources>} resources @returns {import('../install.js').CommandHandlers} */
+/** @param {ReturnType<import('../backend.js').createAsyncBackend>} backend @param {ReturnType<import('../protocols/resources.js').createResources>} resources @returns {import('../install.js').CommandHandlers} */
 export function createChatCommands(backend, resources) {
     return {
-        open_chat_payload_jsonl: ({ target, allowNotFound }) => {
+        open_chat_payload_jsonl: async ({ target, allowNotFound }) => {
             if (target.kind !== 'character') throw { Unsupported: 'Web Host supports character chat reads' };
             const { characterId, fileName } = target;
-            const payload = readChatRecords(backend, { avatar_url: characterAvatarFileNameFromStem(characterId), file_name: fileName });
+            const payload = await readChatRecords(backend, { avatar_url: characterAvatarFileNameFromStem(characterId), file_name: fileName });
             if (payload !== null) {
                 return resources.open(new TextEncoder().encode(payload.map(record => JSON.stringify(record)).join('\n')), READ_CHUNK_BYTES);
             }
