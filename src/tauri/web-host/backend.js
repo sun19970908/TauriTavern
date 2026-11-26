@@ -37,13 +37,18 @@ function parseJson(method, url, response) {
  * @param {import('./install.js').WebHostBackend} backend
  */
 export function createAsyncBackend(backend) {
-    /** @param {string} url @param {BackendRequest['body']} body @param {string} [method] */
-    async function send(url, body, method = 'POST') {
-        return backend.handle({ method, url, headers: headersForBody(body), body });
+    /** @param {string} url @param {BackendRequest['body']} body @param {string} [method] @param {Record<string, string>} [headers] */
+    async function send(url, body, method = 'POST', headers = {}) {
+        return backend.handle({
+            method,
+            url,
+            headers: { ...headersForBody(body), ...headers },
+            body,
+        });
     }
-    /** @param {string} url @param {BackendRequest['body']} body @param {string} [method] */
-    async function request(url, body, method = 'POST') {
-        return assertOk(method, url, await send(url, body, method));
+    /** @param {string} url @param {BackendRequest['body']} body @param {string} [method] @param {Record<string, string>} [headers] */
+    async function request(url, body, method = 'POST', headers = {}) {
+        return assertOk(method, url, await send(url, body, method, headers));
     }
     /** @param {string} url @param {any} [body] @param {string} [method] */
     async function json(url, body = {}, method = 'POST') {

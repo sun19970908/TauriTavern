@@ -2,6 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHttpBackend, createRemoteStore, detectHostIdentity } from '../src/tauri/web-host/remote-backend.js';
+import { createAsyncBackend } from '../src/tauri/web-host/backend.js';
 
 let server;
 let origin;
@@ -60,6 +61,29 @@ test('HTTP backend maps GET, JSON POST and error responses', async () => {
     const failure = await backend.handle({ method: 'POST', url: '/api/error', headers: {}, body: '{}' });
     assert.equal(failure.status, 400);
     assert.equal(failure.body, 'bad');
+});
+
+test('async backend merges custom request headers', async () => {
+    /** @type {any[]} */
+    const seen = [];
+    const st = createAsyncBackend({
+        async handle(request) {
+            seen.push(request);
+            return {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(request.headers),
+            };
+        },
+    });
+
+    const response = await st.send('/api/settings/save', '{}', 'POST', {
+        'X-TauriTavern-Settings-Revision': '{"hash":"before"}',
+    });
+    assert.equal(response.status, 200);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].headers['content-type'], 'application/json');
+    assert.equal(seen[0].headers['X-TauriTavern-Settings-Revision'], '{"hash":"before"}');
 });
 
 test('HTTP backend encodes form entries as multipart and lets fetch set the boundary', async () => {

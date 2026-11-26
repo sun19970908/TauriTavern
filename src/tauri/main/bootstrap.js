@@ -293,13 +293,18 @@ export function bootstrapTauriMain() {
 
         const method = getMethodHint(input, init);
         // Native-only routes that read or mutate the desktop filesystem: recent
-        // chat summaries, preset persistence, and extension discovery/install/
-        // update/delete. The browser Web Host has no equivalent commands, so let
-        // the remote Node entrance relay them to the desktop app's native handlers.
+        // chat summaries, preset persistence, extension discovery/install/
+        // update/delete, uploaded files, and character/avatar data. The browser
+        // Web Host has no equivalent commands, so let the remote Node entrance
+        // relay them to the desktop app's native handlers.
         if (isRemoteWebHost && (
             url.pathname === '/api/chats/recent'
             || url.pathname.startsWith('/api/presets/')
             || url.pathname.startsWith('/api/extensions/')
+            || url.pathname.startsWith('/api/files/')
+            || url.pathname.startsWith('/api/images/')
+            || url.pathname === '/api/characters/all'
+            || url.pathname === '/api/avatars/get'
         )) {
             return false;
         }

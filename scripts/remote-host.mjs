@@ -202,6 +202,10 @@ export function createRemoteHostServer({
     const pending = new Map();
     /** @type {Array<{ response: import('node:http').ServerResponse, timer?: NodeJS.Timeout }>} */
     const waiters = [];
+    /** @type {Array<{ method: string, path: string, status: number, durationMs: number, bridgeConnected: boolean, at: string, bytes: number }>} */
+    const recentRelays = [];
+    /** @type {Array<unknown>} */
+    const recentClientErrors = [];
 
     function bridgeSeen() {
         lastBridgeAt = Date.now();
@@ -289,6 +293,20 @@ export function createRemoteHostServer({
             cleanup(item);
             if (!response.writableEnded) sendText(response, 504, 'No PC bridge connected');
         }, bridgeTimeoutMs);
+        const startedAt = Date.now();
+        const bridgeConnectedAtStart = startedAt - lastBridgeAt < pollTimeoutMs + 5_000;
+        response.on('finish', () => {
+            recentRelays.unshift({
+                at: new Date(startedAt).toISOString(),
+                method: item.method,
+                path: url.pathname,
+                status: response.statusCode,
+                durationMs: Date.now() - startedAt,
+                bytes: Number(response.getHeader('content-length') ?? 0),
+                bridgeConnected: bridgeConnectedAtStart,
+            });
+            recentRelays.splice(50);
+        });
         response.on('close', () => {
             if (!response.writableEnded) cleanup(item);
         });
@@ -374,11 +392,35 @@ export function createRemoteHostServer({
         if (url.pathname === `${REMOTE_PREFIX}poll`) return poll(request, response);
         if (url.pathname === `${REMOTE_PREFIX}response`) return acceptResponse(request, response);
         if (url.pathname === `${REMOTE_PREFIX}chunk`) return acceptChunk(request, response);
+        if (url.pathname === `${REMOTE_PREFIX}client-log`) {
+            if (request.method !== 'POST') {
+                sendText(response, 405, 'Client log accepts POST only');
+                return;
+            }
+            const raw = await readBody(request);
+            let data;
+            try {
+                data = JSON.parse(raw);
+            } catch {
+                data = { kind: 'invalid-json', raw: raw.slice(0, 2000) };
+            }
+            const serialized = JSON.stringify(data ?? null);
+            recentClientErrors.unshift({
+                receivedAt: new Date().toISOString(),
+                remoteAddress: request.socket.remoteAddress ?? '',
+                data: serialized.length > 12_000 ? { truncated: serialized.slice(0, 12_000) } : data,
+            });
+            recentClientErrors.splice(50);
+            sendJson(response, 200, { ok: true });
+            return;
+        }
         if (url.pathname === `${REMOTE_PREFIX}status`) {
             return sendJson(response, 200, {
                 bridgeConnected: Date.now() - lastBridgeAt < pollTimeoutMs + 5_000,
                 queued: queue.length,
                 pending: pending.size,
+                recentRelays,
+                recentClientErrors,
             });
         }
         if (isRelayPath(url.pathname)) return relay(request, response, url);

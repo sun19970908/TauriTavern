@@ -1,5 +1,6 @@
 // @ts-check
 import { BYTE_HEADERS } from '../../main/kernel/byte-protocol.js';
+import { createRandomId } from '../../main/kernel/random-id.js';
 import { decodeBase64ToBytes } from '../../main/binary-utils.js';
 
 /** Byte framing shared by settings and chat commits; each protocol owns its sessions. */
@@ -16,7 +17,7 @@ export function createByteCommits() {
     return {
         /** @param {any} metadata */
         begin(metadata) {
-            const sessionId = crypto.randomUUID();
+            const sessionId = createRandomId();
             sessions.set(sessionId, { metadata: structuredClone(metadata), size: 0, chunks: [] });
             return { sessionId, maxFrameBytes };
         },
