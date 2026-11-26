@@ -1,7 +1,8 @@
 #AdvancedFormatting[data-tt-assistant="assistant"] > :not(#tt-assistant) { display: none !important; }
-#AdvancedFormatting[data-tt-assistant="assistant"] { padding: 0; }
-/* Keep the host's toolbar and mobile insets; desktop assistants cover the chat composer. */
-#AdvancedFormatting[data-tt-assistant="assistant"].openDrawer { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+/* Keep the host's toolbar and mobile insets; desktop assistants cover the chat composer. The size
+   holds while the drawer is closing, so only display depends on the open state. */
+#AdvancedFormatting[data-tt-assistant="assistant"] { padding: 0; flex-direction: column; height: 100dvh; overflow: hidden; }
+#AdvancedFormatting[data-tt-assistant="assistant"].openDrawer { display: flex; }
 #tt-assistant { min-height: 0; min-width: 0; flex: 1 1 auto; }
 
 .ttia-root {
@@ -111,7 +112,8 @@
 .ttia-run { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .ttia-run-work { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--ttia-d-med) var(--ttia-ease), opacity var(--ttia-d-fast); }
 .ttia-run-work.is-open { grid-template-rows: 1fr; opacity: 1; }
-.ttia-run-work > div { min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 12px; }
+.ttia-run-work > div { min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 12px; transition: display var(--ttia-d-med) allow-discrete; }
+.ttia-run-work:not(.is-open) > div { display: none; }
 .ttia-root .ttia-run-bar {
     width: 100%; min-height: 28px; padding: 3px 4px; gap: 8px; justify-content: flex-start;
     font-size: .78em; color: var(--ttia-muted); border-radius: 7px;
@@ -165,7 +167,8 @@
 .ttia-fold.is-open > .ttia-fold-toggle > i:first-child { transform: rotate(90deg); }
 .ttia-fold-body { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--ttia-d-med) var(--ttia-ease), opacity var(--ttia-d-fast); }
 .ttia-fold.is-open > .ttia-fold-body { grid-template-rows: 1fr; opacity: 1; }
-.ttia-fold-body > div { min-height: 0; overflow: hidden; }
+.ttia-fold-body > div { min-height: 0; overflow: hidden; transition: display var(--ttia-d-med) allow-discrete; }
+.ttia-fold:not(.is-open) > .ttia-fold-body > div { display: none; }
 .ttia-reasoning .ttia-markdown { color: var(--ttia-muted); font-size: .9em; border-left: 1px solid var(--ttia-line); margin: 7px 0 12px 10px; padding: 0 0 0 16px; }
 .ttia-shimmer {
     background: linear-gradient(100deg, var(--ttia-muted) 38%, var(--ttia-ink) 50%, var(--ttia-muted) 62%);
@@ -199,6 +202,7 @@
 .ttia-tool.is-running .ttia-tool-state { color: var(--ttia-live); }
 .ttia-detail-label { display: flex; align-items: center; justify-content: space-between; font-size: .83em; color: var(--ttia-muted); }
 .ttia-tool-detail { margin: 4px 0 12px 10px; padding-left: 15px; border-left: 1px solid var(--ttia-line); }
+.ttia-tool-image { display: block; max-width: 100%; max-height: 22rem; margin: 8px 0; border: 1px solid var(--ttia-line); border-radius: 9px; }
 .ttia-refs { font: .73em/1.6 var(--monoFontFamily); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ttia-muted); }
 .ttia-root .ttia-latest { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); border: 1px solid var(--ttia-line); border-radius: 99px; background: var(--ttia-surface); box-shadow: var(--ttia-shadow-lift); font-size: .8em; padding: 7px 12px; white-space: nowrap; animation: ttia-latest-in 260ms var(--ttia-spring) both; }
 .ttia-root .ttia-latest:active { transform: translateX(-50%) scale(.97); }
@@ -246,6 +250,12 @@
 .ttia-model[data-state="missing"] .ttia-chip-icon::after { background: var(--warning); }
 .ttia-effort { flex-shrink: 0; }
 .ttia-root .ttia-effort .ttia-chip { gap: 6px; }
+.ttia-context { flex-shrink: 0; }
+.ttia-root .ttia-context .ttia-chip { gap: 5px; font-variant-numeric: tabular-nums; }
+.ttia-context-ring { flex-shrink: 0; width: 14px; height: 14px; transform: rotate(-90deg); }
+.ttia-context-ring circle { fill: none; stroke-width: 2; }
+.ttia-context-ring circle:first-child { stroke: var(--ttia-line); }
+.ttia-context-ring circle:last-child { stroke: currentColor; transition: stroke-dasharray var(--ttia-d-med) var(--ttia-ease); }
 .ttia-menu-pop {
     position: absolute; z-index: 2; left: var(--ttia-pop-x, 0); bottom: calc(100% + 6px);
     width: max-content; min-width: 10rem; max-width: min(17rem, calc(100vw - 32px));
@@ -279,7 +289,7 @@
 .ttia-menu-item > i { flex-shrink: 0; width: 1em; margin-left: auto; font-size: .78em; }
 .ttia-menu-item[aria-checked="false"] > i { visibility: hidden; }
 .ttia-menu-detail { flex-shrink: 0; color: var(--ttia-muted); font-size: .88em; }
-.ttia-menu-item.is-missing { color: var(--ttia-muted); cursor: default; }
+.ttia-menu-item[aria-disabled="true"] { color: var(--ttia-muted); cursor: default; }
 .ttia-menu-item.is-missing .ttia-menu-detail { color: var(--warning); }
 .ttia-menu-rule { height: 1px; margin: 4px 8px; background: var(--ttia-line); }
 .ttia-root .ttia-model-manage { color: var(--ttia-muted); transition: color var(--ttia-d-fast); }
@@ -393,37 +403,6 @@
 #advanced-formatting-button .drawer-icon[data-tt-assistant-activity="working"]::after { animation: ttia-breathe 1.7s ease-in-out infinite; }
 #advanced-formatting-button .drawer-icon[data-tt-assistant-activity] { position: relative; }
 
-/* The assistant cursor lives outside the drawer and never receives user input. */
-.ttia-agent-cursor {
-    position: fixed; inset: 0 auto auto 0; z-index: 2147483647;
-    width: 24px; height: 24px; min-width: 0; min-height: 0;
-    margin: 0; padding: 0; border: 0; overflow: visible;
-    background: transparent; box-shadow: none; user-select: none;
-    --ttia-cursor-accent: var(--SmartThemeUnderlineColor);
-}
-.ttia-agent-cursor, .ttia-agent-cursor * { pointer-events: none !important; }
-.ttia-agent-cursor::backdrop { background: transparent; pointer-events: none; }
-.ttia-agent-cursor::before {
-    content: ''; position: absolute; left: -12px; top: -12px; width: 40px; height: 40px;
-    border-radius: 50%;
-    background: radial-gradient(circle, color-mix(in srgb, var(--ttia-cursor-accent) 32%, transparent), transparent 70%);
-}
-.ttia-agent-cursor svg {
-    position: absolute; left: -4px; top: -4px; width: 24px; height: 24px; overflow: visible;
-    fill: var(--SmartThemeBodyColor); stroke: var(--SmartThemeBlurTintColor);
-    stroke-width: 1.8; stroke-linejoin: round;
-    filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--SmartThemeShadowColor) 50%, transparent));
-}
-.ttia-cursor-pulse {
-    position: absolute; left: -10px; top: -10px; width: 20px; height: 20px;
-    box-sizing: border-box; border-radius: 50%; opacity: 0;
-    border: 1.5px solid var(--ttia-cursor-accent);
-}
-@media (pointer: coarse), (max-width: 600px) {
-    .ttia-agent-cursor::before { left: -8px; top: -8px; width: 32px; height: 32px; }
-    .ttia-cursor-pulse { left: -8px; top: -8px; width: 16px; height: 16px; }
-}
-
 /* ---------- motion ---------- */
 @keyframes ttia-breathe { 0%, 100% { opacity: .45; transform: scale(.85); } 50% { opacity: 1; transform: scale(1); } }
 @keyframes ttia-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
@@ -439,7 +418,7 @@
 @keyframes ttia-emblem-in { from { opacity: 0; transform: scale(.86); } to { opacity: 1; transform: none; } }
 
 @media (min-width: 1001px) {
-    #AdvancedFormatting[data-tt-assistant="assistant"].openDrawer:has(.ttia-root[data-mobile="false"]) { max-height: calc(100dvh - var(--topBarBlockSize)); }
+    #AdvancedFormatting[data-tt-assistant="assistant"]:has(.ttia-root[data-mobile="false"]) { max-height: calc(100dvh - var(--topBarBlockSize)); }
     .ttia-root[data-mobile="false"] .ttia-assistant { width: var(--ttia-content-width); min-width: min(100%, 28rem); }
 }
 @media (max-width: 1000px) {

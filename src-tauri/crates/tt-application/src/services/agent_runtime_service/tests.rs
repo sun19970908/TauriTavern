@@ -93,13 +93,12 @@ fn resolve_run_skill_scope_refs_rejects_mismatched_character() {
         frozen_run_input_snapshot: None,
         generation_intent: None,
         skill_scope_refs: AgentSkillScopeRefsDto {
-            preset: None,
             character_id: Some("Other".to_string()),
         },
         options: AgentStartRunOptionsDto::default(),
     };
 
-    let error = resolve_run_skill_scope_refs(&dto, &profile).unwrap_err();
+    let error = resolve_run_skill_scope_refs(&dto, &profile, &json!({})).unwrap_err();
 
     assert!(
         error
@@ -162,10 +161,7 @@ fn resolved_profile(preset: AgentPresetBinding) -> ResolvedAgentProfile {
             allow: Vec::new(),
             deny: Vec::new(),
             tool_descriptions: Default::default(),
-            max_rounds: 1,
-            max_calls_per_run: 1,
             external_result_inline_char_limit: 50_000,
-            max_calls_per_tool: Default::default(),
         },
         skills: AgentSkillPolicy {
             visible: vec!["*".to_string()],

@@ -1,12 +1,10 @@
 import { createAbortError, isAbortError } from './kernel/abort-error.js';
 
 export function createInterceptors({
-    isTauri,
     originalFetch,
     canHandleRequest,
     toUrl,
     routeRequest,
-    jsonResponse,
 }) {
     const fetchPatchState = new WeakMap();
     const ajaxPatchState = new WeakMap();
@@ -58,8 +56,7 @@ export function createInterceptors({
         const abortRace = createAbortRace(signal);
         try {
             const pending = Promise.resolve(routeRequest(requestUrl, input, init, targetWindow))
-                .then((response) => {
-                    const result = response || jsonResponse({ error: `Unsupported endpoint: ${requestUrl.pathname}` }, 404);
+                .then((result) => {
                     if (signal?.aborted) {
                         // Opening may finish after the caller has already aborted.
                         void result.body?.cancel().catch(error => console.warn('Failed to close aborted response', error));
@@ -149,10 +146,6 @@ export function createInterceptors({
                 throw createAbortError();
             }
 
-            if (!isTauri) {
-                return delegateFetch(input, init);
-            }
-
             const requestUrl = toUrl(input, resolveWindowBaseUrl(targetWindow));
             if (!requestUrl || !canHandleRequest(requestUrl, input, init, targetWindow)) {
                 return delegateFetch(input, init);
@@ -192,10 +185,6 @@ export function createInterceptors({
         const originalAjax = $.ajax.bind($);
 
         const patchedAjax = function ajaxProxy(urlOrOptions, maybeOptions) {
-            if (!isTauri) {
-                return originalAjax(urlOrOptions, maybeOptions);
-            }
-
             const options = typeof urlOrOptions === 'string'
                 ? { ...(maybeOptions || {}), url: urlOrOptions }
                 : { ...(urlOrOptions || {}) };

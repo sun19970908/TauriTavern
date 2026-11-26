@@ -27,7 +27,7 @@
 
 页面脚本运行前，宿主已写入 `window.__TAURITAVERN_HOST__`（见 2.2）。
 
-开发态 HTTP 入口会先由 `scripts/tauri-dev-server.mjs` 注入 `src/dev-sw-bootstrap.js`，仅负责让持久 Service Worker registration 与当前 WebView 会话重新绑定，不参与应用模块初始化。
+开发态资源桥的就绪契约见 2.2，安装与接管机制见[第三方扩展](CurrentState/ThirdPartyExtensions.md)。
 
 1. `src/init.js`：负责最早期的环境标记、可选 perf 开关与动态 import。
 2. `src/tauri-main.js`：薄入口，仅调用 `bootstrapTauriMain()`。
@@ -36,17 +36,21 @@
 
 ### 2.2 就绪信号（Public/Project）
 
+- `window.__TAURITAVERN_DEV_SW_READY__ : Promise<void> | undefined`（Project）
+  - 开发资源桥引导脚本在安装资源桥时同步发布；SW 接管页面后 resolve，注册失败则 reject。
+  - 以下情况不发布，应用照常启动：打包运行（没有注入）；移动端 dev（经 app 协议加载，资源由宿主提供）；WebView 不支持 SW（会警告开发资源不可用）；旧会话正在注销并重载。
+  - `init.js` 在导入 `lib.js` 前等待它。
 - `window.__TAURITAVERN_MAIN_READY__ : Promise<void>`
-  - 由 `src/tauri/main/bootstrap.js` 写入，表示宿主层初始化已完成（或失败已被捕获并写入 console）。
-  - 在 Tauri runtime 下，resolve 前必须完成 Rust `BackendReadiness` 等待，确保首批依赖 `AppState` 的命令不靠 “state not managed” 文本重试作为正常控制流。
+  - 由 `src/tauri/main/bootstrap.js` 在主应用模块加载前同步写入；初始化成功时 resolve，失败时 reject，由调用者传播失败。
+  - resolve 前必须完成 Rust `BackendReadiness` 等待，确保首批依赖 `AppState` 的命令不靠 “state not managed” 文本重试作为正常控制流。
 - `window.__TAURITAVERN_PERF_READY__ : Promise<unknown> | undefined`
   - 仅在 perf-hud 启用时存在（见第 5 节）。
 - `globalThis.__TAURITAVERN_PERF_ENABLED__ : boolean`
   - 由 `src/init.js` 在动态 import 前写入；`bootstrap` 会优先读取它（避免重复计算/时序差异）。
 - `window.__TAURI_RUNNING__ : true`
-  - 由 `src/init.js` 写入；用于桥接层尽早判断 Tauri 环境（避免移动端注入时序 race）。
+  - 由 `src/init.js` 写入，作为 TT 前端的对外识别标记；内部代码不读取它，新代码使用 `__TAURITAVERN__` 提供的 API。
 - `window.__TAURITAVERN_HOST__ : { platform, kind }`（Project）
-  - 宿主身份：Rust 按编译目标生成，在页面脚本之前写入主 WebView 的顶层 frame，对象冻结。
+  - 宿主身份：宿主在页面脚本运行前写入 TT 页面的 `window`，对象冻结。原生应用中由 Rust 按编译目标生成。
   - `platform`：`'windows' | 'macos' | 'linux' | 'android' | 'ios' | 'ohos'`；`kind`：`'desktop' | 'mobile'`，与 Rust 的 `desktop` / `mobile` 编译条件同源。
   - 第一方代码只通过 `src/scripts/util/host-identity.js` 读取，见 `docs/FrontendGuide.md` §2.1。
 
@@ -101,24 +105,29 @@
 
 该 ABI 属于 SillyTavern 兼容层，不放入 `window.__TAURITAVERN__.api`。新 TauriTavern 代码仍应从 `src/lib.js` 显式 import `lodash`。
 
+ESM `/scripts/secrets.js` 的 `writeSecret`、`deleteSecret`、`readSecretState`、`rotateSecret`、`renameSecret` 在请求或随后的状态刷新失败时拒绝 Promise，本身不弹通知，由调用者处理并通知。`writeSecret` 写入成功而刷新失败时密钥已经保存，不应因此重写；未指定 `allowEmpty` 时传入空值等同删除。
+
 ### 3.6 平台 ABI（Public，新）
 
 为避免未来继续扩散 `window.__TAURITAVERN_*` 零散符号，宿主层额外提供一个**统一出口**：
 
 - `window.__TAURITAVERN__ : { abiVersion, traceHeader, ready, invoke, assets, api, iosPolicy }`
-  - `abiVersion: 1`：ABI 版本号（已发布扩展契约发生语义化破坏改动时递增）。
+  - `abiVersion: 2`：已发布扩展契约发生破坏性语义变化时递增。
   - `traceHeader: string`：请求追踪 header 名（见 4.4）。
   - `ready: Promise<void> | null`：与 `__TAURITAVERN_MAIN_READY__` 语义一致。
   - `invoke.safeInvoke(...)` / `invoke.flushAll()`：对 `context` invoke 能力的稳定包装。
   - `assets.thumbnailUrl` / `assets.backgroundPath`：对 3.1 中稳定 Host Resource URL helper 的统一引用。
   - `iosPolicy`（Project）：iOS 分发策略的启动快照，见 `docs/CurrentState/iOSPolicy.md`。
-  - `api.layout`：布局契约 API（safe-area / viewport / Android IME），并配合 `data-tt-mobile-surface` taxonomy 让扩展以几行 opt-in 完成移动端适配。
-    - 详细签名与示例见：`docs/API/Layout.md`。
+  - `api.layout`：读取与订阅已排除原生遮挡的内容视口；`capture()` 属于第一方使用的 Project Contract，见 [API/Layout.md](API/Layout.md)。
   - `api.chat`：TauriTavern 独有的聊天/记忆类扩展 API（聊天摘要、元数据、历史分页、稳定存储、后端定位、纯文本检索）。
     - 详细签名与示例见：`docs/API/Chat.md`。
-  - `api.characterCards`：用原生选择器选择本地角色卡（`json/png`），返回标准 `File[]`，交给上游的导入或替换流程。
+  - `api.characterCards`：选择角色卡文件，以及接管卡内的世界书。
     - `isNativePickerAvailable()`：所有宿主都为 `true`。
-    - `pickFiles(options?: { multiple?: boolean }) -> Promise<File[] | null>`：支持多选；取消返回 `null`，失败抛错。
+    - `pickFiles(options?: { multiple?: boolean }) -> Promise<File[] | null>`：选择 `json/png` 角色卡，返回标准 `File[]`；支持多选；取消返回 `null`，失败抛错。
+    - Project，第一方使用，参数为头像文件名：
+      - `adoptLorebook(avatar)`：按角色当前的绑定，接管卡内世界书。
+      - `resolveLorebookAdoption(avatar, choice, token)`：提交 `adopt` 或 `update`。决定已过期时，以 `LorebookAdoptionConflictError` 拒绝。
+      - 两个方法都返回 `TauriTavernCharacterLorebookAdoption`（`src/types.d.ts`），失败时拒绝。规则见[角色世界书](CurrentState/CharacterIdentityContract.md#10-角色世界书)。
   - `api.extension.store`：扩展级**全局持久化**（不绑定 chat），提供 KV JSON + Blob，支持多 table 与 Blob 流式读取。
     - 签名、读写边界与示例见 [Extension Store API](API/Extension.md)。
   - `api.db`：本地向量、JSON、文本索引、图和 TQL 数据库。`open` 异步等待可用；NodeId 为整数；签名、索引恢复边界与共享关闭语义见 [Database API](API/Database.md)。
@@ -169,11 +178,12 @@
 - `openEntry()` 必须复用上游 World Info 模块自身的导航能力；宿主 ABI 层不得直接依赖 `#WorldInfo`、`#world_editor_select`、`[uid=\"...\"]` 等 DOM 细节。
 
 - `api.agent`：运行控制、历史、工作区详情与 Profile 管理，见 [Agent API](API/Agent.md)。
-  - Chat 与 Session 共用 PromptManager、统一的 Agent snapshot 和 Rust 模型/工具循环；Run 事件与实时投影独立于 SillyTavern 生成事件。
+  - Chat 与 Session 接受统一的 Agent snapshot；Run 事件与实时投影独立于 SillyTavern 生成事件。
   - Chat 使用稳定聊天身份，宿主提交桥复用聊天保存流程；保存成功或明确失败后释放生成状态。续接保留 Run 身份，分叉创建新聊天身份并复制持久版本。
-  - Session 独立于当前角色聊天和写作生成状态，不发出 SillyTavern 聊天/生成事件；目录、共享配置与连续历史由后端管理。Agent Mode 只控制 Chat 的 Agent/Legacy 路由。
+  - Session 独立于当前角色聊天和写作生成状态，不发出 SillyTavern 聊天/生成事件；目录、共享配置与连续历史由后端管理，提示词与宏环境见 [Prompt assembly](Agent/PromptAssembly.md)。Agent Mode 只控制 Chat 的 Agent/Legacy 路由。
   - 扩展工具通过 `tools.register/setEnabled/list` 注册、开关与查询，按 Chat/Session 筛选，共用 Agent 工具执行链路；用法见 [注册扩展工具](API/Agent.md#注册扩展工具)。
   - 运行控制属于 Public Contract；模型回合、任务详情、工具目录和 Timeline 关系是 Project Contract，由对应 API 提供展示 DTO。
+  - Session 历史中的 `compaction`、运行状态 `compacting_context`、`context_compaction_started` / `context_compacted` 事件与 `model_request_created` 的 `context`、`sessions.compact()`，以及 Agent 快照的 `contextLimits: { context, response, tokenizerModel }` 均为 Project Contract；字段与事件形状见 [Agent API](API/Agent.md)。
 
 - `api.llmConnections`：管理 Profile 引用的模型连接，见 [LLM Connection API](API/LlmConnections.md)。Profile 通过连接 ID 和模型 ID 绑定；Model Target 是界面的配置来源。
 
@@ -190,7 +200,7 @@
 
 > 注意：`window.__TAURITAVERN__` 是“平台 ABI”，应保持**小而稳定**；不要把内部实现对象整个暴露出去。
 
-### 3.7 ChatSurface participant（Project Contract）
+### 3.7 ChatSurface（Project Contract）
 
 - `window.__TAURITAVERN__.api.chatSurface`
   - 当前是实验性的 Project Contract，尚未作为 Public Contract 稳定发布。
@@ -199,6 +209,10 @@
   - participant 必须显式声明协议版本；hook 返回同步 disposer，宿主用 `AbortSignal` 表达 mount/content/runtime 三种真实寿命。
   - mount/remount/content lifecycle 不得伪装为 SillyTavern 消息业务事件。
   - 完整协议与 raw API 接入示例见 `docs/API/ChatSurface.md`。
+
+- `SillyTavern.getContext().scrollChatSurfaceTo(options: ScrollToOptions): void`
+  - TT 在上游 `src/scripts/st-context.js` 中增加的函数，属于 Project Contract，目前供第一方助手使用。
+  - 效果等同于对主页面 `#chat` 调用 `scrollTo(options)`。`#chat` 的原生滚动只由 ChatSurface 写入，所以要经由它，不直接操作 DOM。
 
 ---
 
@@ -213,21 +227,24 @@
 
 拦截生效条件（见 `src/tauri/main/bootstrap.js`）：
 
-- 仅在 **Tauri 环境**启用（`bootstrapTauriMain()` 早退保护）。
+- 由宿主启动链路安装；`bootstrapTauriMain()` 只防止重复安装。
 - 仅拦截 **same-origin** 请求（包含被 patch 的同源 iframe/window）。
 - 是否接管由 `router.canHandle(method, pathname)` 决定（仅看 `url.pathname`）。
 
 ### 4.2 未命中行为（Public）
 
-- `fetch`：未命中路由直接透传原生 fetch。
-- `ajax`：未命中路由直接透传原始 `$.ajax`。
-- 命中但无 handler：返回 `404` JSON（`{ error: "Unsupported endpoint: ..." }`）。
+- `/api/*` 整个命名空间由宿主接管：未实现的端点（任意 method）与未返回响应的 handler 都返回 `404` JSON（`{ error: "Unsupported endpoint: <path>" }`，`statusText` 同为该文本）。开发态与生产态一致。
+- 其余未命中路由的请求：`fetch` 透传原生 fetch，`ajax` 透传原始 `$.ajax`。
 
-> 这类行为会被上游与第三方依赖：不要改成 silent fail/空响应。
+> 这类行为会被上游与第三方依赖：不要改成 silent fail/空响应。生产资产协议会把缺失路径回退为 `200 index.html`，因此 `/api/*` 不得透传。
 
 ### 4.3 路由表（Public）
 
 路由位于 `src/tauri/main/routes/*`；公共契约覆盖上游兼容及生态实际依赖的接口。
+
+`/api/characters/import` 的响应比上游多一个 `lorebook` 字段，形状与 `api.characterCards` 相同。角色已经写入、但世界书接管失败时，`lorebook.status` 为 `failed`，错误由后端提示。
+
+`/api/characters/delete` 只删除角色和请求删除的聊天，不删除世界书。界面删卡时如何清理世界书，见[角色世界书](CurrentState/CharacterIdentityContract.md#10-角色世界书)。
 
 第一方聊天读写直连内部 transport，不产生兼容路由的 Fetch 请求；外部观察应使用既有业务事件。`/api/chats/get`、`/api/chats/group/get`、`/api/chats/save`、`/api/chats/group/save` 仍供扩展调用。保存成功为 `200 { ok: true }`；integrity 冲突按错误码识别，返回 `400 { error: 'integrity' }`。
 
@@ -248,7 +265,7 @@
 
 - `/api/*`：应用核心 API（settings/chats/characters/ai/worldinfo…）
   - 用户设定沿用上游 settings 数据形状；列表刷新不写入资料，单项保存失败不影响其他修改。
-  - `/api/settings/save` 接收完整 JSON。读取与保存确认返回 `tauritavern_settings_revision`；调用方将其作为不透明令牌，以 JSON 编码经 `X-TauriTavern-Settings-Revision` 回传。过期令牌返回 409，未携带时仍可覆盖保存。Persona 修改独立确认成败。
+  - `/api/settings/save` 接收设置 JSON：Persona 注册表按 ID 增量提交，提及的 ID 替换整条记录，未提及的不删除；其余设置是完整快照。读取与保存确认返回 `tauritavern_settings_revision`；调用方将其作为不透明令牌，以 JSON 编码经 `X-TauriTavern-Settings-Revision` 回传。过期令牌返回 409，未携带时仍可覆盖保存。Persona 修改独立确认成败。
   - `/api/settings/get` 保持上游响应形状，`settings` 仍为 JSON 字符串；启动读取与应用顺序见 [StartupOptimization §4](CurrentState/StartupOptimization.md#4-设置与-bootstrap-元数据读取)。
 - `/api/backends/chat-completions/generate` 的流式响应由 Rust 进程内会话持有生成任务、移动端 best-effort 后台执行租约与未确认事件；前端通过单调递增的 `after_seq` 消费并确认，WebView 暂停后可在同一 Rust 进程内重放缺失事件。单次读取失败会使用相同 cursor 重试一次，第二次失败才关闭会话。后台租约失败或到期不拥有生成终止权；该保证不跨进程重启，也不伪装成上游 provider 的 HTTP 断点续传。
 - `/css/user.css`：用户自定义 CSS 覆盖文件（数据目录 `_css/user.css`）
@@ -268,7 +285,7 @@
 - `/scripts/extensions/third-party/*`
   - `.git` 是 SillyTavern 迁移兼容所需的普通路径组件；显式文件请求不得仅因任一组件名为 `.git` 而被拒绝。`.`、`..`、编码路径分隔符与路径逃逸仍必须拒绝。
 - `/css/user.css`
-- `/scripts/tauritavern/layout-kit.js`（ESM；扩展可选 DX 糖衣）
+- `/scripts/tauritavern/layout-kit.js`（ESM；`api.layout` 的辅助入口，见 [API/Layout.md](API/Layout.md)）
 - `/thumbnail?type={bg|avatar|persona}&file=...`
 - `/characters/*`、`/User Avatars/*`
 - `/backgrounds/*`、`/assets/*`
@@ -315,14 +332,23 @@ header 名也可从 `window.__TAURITAVERN__?.traceHeader` 获取（用于避免�
 
 ### 5.2 移动端运行时兼容（Public in practice）
 
-移动端旧 WebView 的 polyfills 与第三方浮层/窗口 surface classifier（配合 geometry firewall 的 safe-area contract）属于“运行环境的一部分”，第三方会依赖其存在：
+移动端旧 WebView 的 polyfills 属于运行环境兼容能力：
 
 - `window.__TAURITAVERN_MOBILE_RUNTIME_COMPAT__`
   - 覆盖移动端旧 WebView 的基础 polyfills（例如 `requestIdleCallback` / `cancelIdleCallback`）。
   - Android 的 `navigator.clipboard.writeText()` 映射到宿主原生写入器，same-origin iframe 同样适用；Clipboard 对象上的其他方法保持不变。
-- `window.__TAURITAVERN_MOBILE_OVERLAY_COMPAT__`
-- `window.__TAURITAVERN_MOBILE_IFRAME_VIEWPORT_CONTRACT_BRIDGE__`：same-origin iframe 的 viewport/inset contract bridge（用于 `viewport-host` boundary；主要用于 debug/幂等安装）
 - `window.__TAURITAVERN_MOBILE_WINDOW_OPEN_COMPAT__`：移动端外链 `window.open()` 通过系统浏览器打开（不创建应用内新窗口）
+
+移动布局：移动端原生宿主消费系统栏、刘海与停靠键盘，网页侧契约见 [API/Layout.md](API/Layout.md)。相关名称的当前状态：
+
+| 名称 | 状态 |
+| --- | --- |
+| `--doc-height` | 静态别名：`100dvh`，不支持时 `100vh` |
+| `--tt-inset-*` | `env(safe-area-inset-*, 0px)` 的别名 |
+| `--tt-viewport-bottom-inset` | `--tt-inset-bottom` 的别名 |
+| `--tt-window-x/-y/-width/-height` | Project：只写在 `#bg1` 上，供第一方窗口背景使用 |
+| `data-tt-mobile-surface`；`layout-kit.js` 的 `SURFACE`/`applySurface()` | 保留，无布局作用 |
+| `--tt-ime-bottom`、`--tt-base-viewport-height`、`__TAURITAVERN_INSETS__`、`__TAURITAVERN_MOBILE_OVERLAY_COMPAT__`、`__TAURITAVERN_MOBILE_IFRAME_VIEWPORT_CONTRACT_BRIDGE__`、`__TAURITAVERN_ANDROID_IME_LAYOUT_HOST__` | 已移除 |
 
 TauriTavern 第一方功能在所有平台直接使用同一个原生剪贴板写入器。该契约只授予 `clipboard-manager:allow-write-text`，不包含读取/清空/图片等权限；写入失败必须向调用方传播。
 
@@ -330,11 +356,11 @@ TauriTavern 第一方功能在所有平台直接使用同一个原生剪贴板�
 
 ### 5.3 Dialog 兼容（Public in practice）
 
-> 目的：补齐 iOS/macOS（WKWebView）下脚本生态高频依赖的“浏览器内置弹窗语义”，避免出现“点击后完全无反应”。
+> 目的：保持脚本生态依赖的浏览器内置弹窗语义，用户作出选择后脚本才继续执行。
 
-- iOS/macOS：`window.alert/confirm/prompt` 必须可用且不会挂死（无法展示 UI 时返回 Cancel/默认值并记录错误，不做 silent noop）
+- 所有平台的 `window.alert/confirm/prompt` 由 WebView 原生实现，保持同步语义。宿主不安装 JS 替代实现：dialog 插件注册时不带它替换 `alert/confirm` 的脚本，因此也不授予 `dialog:allow-message`。
+- iOS/macOS 由 [WKUIDelegate 桥](../src-tauri/crates/tauritavern/src/infrastructure/apple_webview_js_dialogs.rs) 展示；无法展示 UI 时返回 Cancel/默认值并记录错误，不能挂死或 silent noop。
 - 若运行环境缺失 `HTMLDialogElement.prototype.showModal`：宿主会安装 `dialog-polyfill` 并覆盖主窗口 + same-origin iframe/window（仅在缺失时启用）
-- 实施细节与边界：见 `docs/WkWebViewJsDialogBridgePlan.md`
 
 ### 5.4 外链打开与 `window.open()`（Public in practice）
 

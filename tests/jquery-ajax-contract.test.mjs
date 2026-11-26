@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeDom } from './helpers/fake-dom.mjs';
 import { createInterceptors } from '../src/tauri/main/interceptors.js';
-import { jsonResponse, textResponse } from '../src/tauri/main/http-utils.js';
+import { textResponse } from '../src/tauri/main/http-utils.js';
 
 function installAjax(t, routeRequest, options = { dataType: 'json' }) {
     const nativeQueueMicrotask = globalThis.queueMicrotask;
@@ -12,12 +12,10 @@ function installAjax(t, routeRequest, options = { dataType: 'json' }) {
     t.after(() => dom.cleanup());
     dom.window.eval(readFileSync(new URL('../src/lib/jquery-3.5.1.min.js', import.meta.url), 'utf8'));
     createInterceptors({
-        isTauri: true,
         originalFetch: dom.window.fetch.bind(dom.window),
         canHandleRequest: () => true,
         toUrl: (input, base) => new URL(String(input), base),
         routeRequest,
-        jsonResponse,
     }).patchJQueryAjax(dom.window);
     return dom.window.jQuery.ajax({ url: '/api/test', ...options });
 }

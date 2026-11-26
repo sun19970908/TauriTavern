@@ -47,7 +47,7 @@ impl AgentProfileService {
         }
 
         let mut session_profile_updated = false;
-        if let Some(mut profile) = self.session_repository.load_session_profile().await?
+        if let Some(mut profile) = self.load_session_profile().await?
             && retarget_preset_binding(&mut profile.preset, &from, &to)
         {
             self.session_repository
@@ -87,7 +87,7 @@ pub(super) async fn validate_preset_binding(
         ));
     }
     match binding.mode {
-        AgentPresetBindingMode::CurrentPromptSnapshot | AgentPresetBindingMode::None => Ok(()),
+        AgentPresetBindingMode::CurrentPromptSnapshot => Ok(()),
         AgentPresetBindingMode::Ref => {
             let Some(ref_) = binding.ref_.as_ref() else {
                 return Err(ApplicationError::ValidationError(

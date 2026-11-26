@@ -151,21 +151,25 @@ pub(super) async fn build(
         repositories.secret_repository.clone(),
         ios_policy.clone(),
     ));
-    let agent_services = agent::build(
-        &repositories,
-        skill_service.clone(),
-        chat_completion_service.clone(),
-        llm_connection_service.clone(),
-        mcp_service.clone(),
-        Arc::new(WorkspaceShellEngine),
-        app_handle
-            .state::<Arc<AgentExtensionTools>>()
-            .inner()
-            .clone(),
-    );
     let tokenization_service = Arc::new(TokenizationService::new(
         repositories.tokenizer_repository.clone(),
     ));
+    let agent_services = agent::build(
+        &repositories,
+        agent::AgentDependencies {
+            tool_image_normalizer: Arc::new(tt_adapter_media::MediaToolImageNormalizer),
+            skill_service: skill_service.clone(),
+            chat_completion_service: chat_completion_service.clone(),
+            llm_connection_service: llm_connection_service.clone(),
+            mcp_service: mcp_service.clone(),
+            tokenization_service: tokenization_service.clone(),
+            workspace_shell: Arc::new(WorkspaceShellEngine),
+            extension_tools: app_handle
+                .state::<Arc<AgentExtensionTools>>()
+                .inner()
+                .clone(),
+        },
+    );
     let stable_diffusion_service = Arc::new(StableDiffusionService::new(
         repositories.stable_diffusion_repository.clone(),
         repositories.secret_repository.clone(),

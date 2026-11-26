@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use tt_adapter_http::HttpClientPool;
 use tt_adapter_storage_core::chat_directory_identity::new_shared_chat_alias_store_for_user_dir;
 use tt_adapter_storage_core::{FileChatRepository, FileSettingsRepository};
 use tt_adapter_storage_core::{FileLlmConnectionRepository, FileMcpServerRepository};
@@ -25,16 +26,17 @@ use tt_adapter_storage_userdata::FileWorldInfoRepository;
 use tt_adapter_storage_userdata::png_card_metadata::{
     read_character_data_from_png, write_character_data_to_png,
 };
+use tt_adapter_tokenization::MiktikTokenizerRepository;
 use tt_adapter_workspace_shell::WorkspaceShellEngine;
 use tt_application::dto::agent_dto::{
     AgentResolveChatCommitDto, AgentResolvePersistentStateMetadataUpdateDto, AgentRunHandleDto,
     AgentSkillScopeRefsDto, AgentStartRunDto, AgentStartRunOptionsDto,
 };
 use tt_application::dto::character_dto::{
-    CharacterLorebookConflictResolution, CheckCharacterLorebookConflictDto, CreateCharacterDto,
-    DeleteCharacterDto, ExportCharacterContentDto, ImportCharacterDto, MergeCharacterCardDataDto,
-    ReplaceCharacterDto, ResolveCharacterLorebookConflictDto, UpdateAvatarDto,
-    UpdateCharacterCardDataDto, UpdateCharacterDto,
+    CharacterLorebookAdoptionChoice, CharacterLorebookAdoptionDto, CreateCharacterDto,
+    ExportCharacterContentDto, ImportCharacterDto, MergeCharacterCardDataDto, ReplaceCharacterDto,
+    ResolveCharacterLorebookAdoptionDto, UpdateAvatarDto, UpdateCharacterCardDataDto,
+    UpdateCharacterDto,
 };
 use tt_application::dto::chat_completion_dto::ChatCompletionGenerateRequestDto;
 use tt_application::errors::ApplicationError;
@@ -55,6 +57,7 @@ use tt_application::services::llm_connection_service::LlmConnectionService;
 use tt_application::services::mcp_service::McpService;
 use tt_application::services::prompt_assembly_service::PromptAssemblyService;
 use tt_application::services::skill_service::SkillService;
+use tt_application::services::tokenization_service::TokenizationService;
 use tt_domain::errors::DomainError;
 use tt_domain::models::agent::profile::{
     AgentDelegationPolicy, AgentProfileId, DEFAULT_AGENT_PROFILE_ID,
@@ -198,6 +201,7 @@ fn agent_runtime_fixture_with_shell(
     responses: Vec<Result<Value, ApplicationError>>,
     shell: Arc<dyn tt_ports::workspace_shell::WorkspaceShell>,
 ) -> AgentRuntimeFixture {
+    std::fs::create_dir_all(root.join("builtin-skills")).unwrap();
     let default_user = root.join("default-user");
     let aliases = new_shared_chat_alias_store_for_user_dir(&default_user);
     let agent_repository = Arc::new(FileAgentRepository::new(
@@ -225,6 +229,7 @@ fn agent_runtime_fixture_with_shell(
     ));
     let skill_service = Arc::new(SkillService::new(Arc::new(FileSkillRepository::new(
         root.join("_tauritavern/skills"),
+        root.join("builtin-skills"),
     ))));
     let llm_connection_service = Arc::new(LlmConnectionService::new(
         Arc::new(FileLlmConnectionRepository::new(
@@ -267,6 +272,13 @@ fn agent_runtime_fixture_with_shell(
         mcp_service.clone(),
         shell,
         extension_tools.clone(),
+        Arc::new(TokenizationService::new(Arc::new(
+            MiktikTokenizerRepository::new(
+                root.join("tokenizers"),
+                Arc::new(HttpClientPool::new("TauriTavern contract tests")),
+            ),
+        ))),
+        Arc::new(tt_adapter_media::MediaToolImageNormalizer),
     ));
 
     AgentRuntimeFixture {
@@ -326,7 +338,7 @@ async fn resolve_contract_profile(
     fixture
         .profile_service
         .resolve_profile(AgentProfileResolveInput {
-            profile_id: None,
+            profile_id: Some("default-writer"),
             tool_catalog: registry.catalog(),
         })
         .await
@@ -349,7 +361,7 @@ async fn start_contract_agent_run(
             presentation: Some(presentation),
             ..Default::default()
         },
-        None,
+        Some(contract_frozen_run_input()),
     )
     .await
 }
@@ -392,6 +404,23 @@ async fn start_contract_agent_run_with_options(
         })
         .await
         .expect("start contract Agent run")
+}
+
+fn contract_frozen_run_input() -> Value {
+    json!({
+        "schemaVersion": 2, "kind": "tauritavern.agentFrozenRunInputSnapshot", "generationType": "normal",
+        "promptInputs": { "messages": [], "extensionPrompts": {} },
+        "worldInfoActivation": { "entries": [] },
+        "macroContext": {},
+        "currentPreset": {
+            "apiId": "openai", "name": "Captured A",
+            "settings": { "prompts": [{ "identifier": "main", "content": "Captured preset A" }] }
+        },
+        "currentModelConnection": {
+            "schemaVersion": 1, "kind": "tauritavern.currentModelConnectionSnapshot",
+            "settings": { "chat_completion_source": "openai", "model": "captured-model", "openai_model": "captured-model" }
+        }
+    })
 }
 
 async fn wait_for_terminal_agent_run(repository: &FileAgentRepository, run_id: &str) -> AgentRun {
@@ -572,7 +601,6 @@ async fn execute_agent_loop_with_host_resolver<R>(
     service: Arc<AgentRuntimeService>,
     run_id: String,
     prompt_snapshot: Value,
-    request: ChatCompletionGenerateRequestDto,
     profile: tt_domain::models::agent::profile::ResolvedAgentProfile,
     cancel_receiver: &mut watch::Receiver<bool>,
     resolver: R,
@@ -586,7 +614,6 @@ where
                 service.execute_agent_loop_run_inner(
                     &run_id,
                     prompt_snapshot,
-                    request,
                     profile,
                     cancel_receiver,
                 ),
@@ -884,6 +911,7 @@ impl McpGateway for ContractMcpGateway {
         }
         Ok(McpCallOutcome::KnownResponse(McpKnownResponse::ToolResult(
             McpToolCallResult {
+                images: Vec::new(),
                 is_error: false,
                 text: vec![McpTextContent {
                     index: 0,

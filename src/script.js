@@ -1,3 +1,4 @@
+import { getPageForItem, initPagination } from './scripts/pagination.js';
 import { hostPlatform, isMobileHost } from './scripts/util/host-identity.js';
 import {
     showdown,
@@ -46,8 +47,7 @@ import {
     saveCharacterChatMetadata,
 } from './scripts/chat-payload-transport.js';
 import { getActiveChatSnapshot } from './tauri/main/adapters/st/active-chat-ref.js';
-import { extension_prompt_roles, extension_prompt_types } from './scripts/extension-prompts.js';
-import { waitForTauriMainReady } from './scripts/extensions/runtime/tauri-ready.js';
+import { composeAuthorsNote, extension_prompt_roles, extension_prompt_types, isWorldInfoInjection } from './scripts/extension-prompts.js';
 import {
     ChatInputFocusIntent,
     focusChatInput,
@@ -71,17 +71,15 @@ import {
     subscribeAgentRunState,
 } from './scripts/tauritavern/agent/agent-run-controller.js';
 import { agentErrorMessage } from './scripts/tauritavern/agent/agent-error-presenter.js';
-import { normalizeAgentContextPolicy } from './scripts/tauritavern/agent/agent-context-policy.js';
-import { createAgentPromptSnapshot } from './scripts/tauritavern/agent/agent-model-messages.js';
+import { normalizeAgentContextPolicy, projectAgentPromptInputs } from './scripts/tauritavern/agent/agent-context-policy.js';
+import { prepareCurrentPromptPayload } from './tauri/main/api/agent-prompt-snapshot.js';
 import { buildPromptAssemblyPayload } from './tauri/main/api/agent-prompt-assembly.js';
 import { normalizeAgentSystemPrompt } from './scripts/tauritavern/agent/agent-system-prompt.js';
 import { readLegacyToolInvocations, stripOldToolTurns } from './scripts/tauritavern/tool-turn-projection.js';
 import {
     buildFrozenRunInputSnapshot,
     updateFrozenMacroContext,
-    createMacroContextFromSnapshot,
     buildCurrentModelConnectionSnapshot,
-    buildSettingsWithCurrentModelConnectionSnapshot,
     normalizeFrozenRunInputSnapshot,
     snapshotExtensionPromptsForFrozenRun,
 } from './scripts/tauritavern/agent/frozen-run-input-snapshot.js';
@@ -130,12 +128,11 @@ import {
     getWorldInfoSettings,
     setWorldInfoSettings,
     world_names,
-    worldInfoCache,
+    selected_world_info,
     flushWorldInfoSaves,
-    loadWorldInfo,
-    updateWorldInfoList,
     deleteWorldInfo,
     importEmbeddedWorldInfo,
+    completeCharacterLorebookAdoption,
     checkEmbeddedWorld,
     setWorldInfoButtonClass,
     wi_anchor_position,
@@ -180,6 +177,7 @@ import {
     power_user,
     persona_description_positions,
     loadMovingUIState,
+    loadCharListState,
     getCustomStoppingStrings,
     MAX_CONTEXT_DEFAULT,
     MAX_RESPONSE_DEFAULT,
@@ -190,6 +188,7 @@ import {
     resetMovableStyles,
     forceCharacterEditorTokenize,
     applyPowerUserSettings,
+    prepareGenerationControls,
     generatedTextFiltered,
     applyStylePins,
 } from './scripts/power-user.js';
@@ -205,9 +204,9 @@ import {
     openai_messages_count,
     chat_completion_sources,
     getChatCompletionModel,
+    getChatCompletionPreset,
     isVertexAiClaudeModelId,
-    createGenerationParameters,
-    createChatCompletionMacroContext,
+    createAgentPromptSnapshot,
     proxies,
     loadProxyPresets,
     selected_proxy,
@@ -257,7 +256,6 @@ import {
     download,
     isDataURL,
     getCharaFilename,
-    PAGINATION_TEMPLATE,
     waitUntilCondition,
     escapeRegex,
     resetScrollHeight,
@@ -275,9 +273,6 @@ import {
     saveBase64AsFile,
     uuidv4,
     equalsIgnoreCaseAndAccents,
-    localizePagination,
-    renderPaginationDropdown,
-    paginationDropdownChangeHandler,
     importFromExternalUrl,
     shiftUpByOne,
     shiftDownByOne,
@@ -318,7 +313,7 @@ import {
 import { checkOpenRouterAuth, initSecrets, primeSecretStateSnapshot, readSecretState, resolveSecretKey, secret_state } from './scripts/secrets.js';
 import { markdownExclusionExt } from './scripts/showdown-exclusion.js';
 import { markdownUnderscoreExt } from './scripts/showdown-underscore.js';
-import { NOTE_MODULE_NAME, initAuthorsNote, metadata_keys, setFloatingPrompt, shouldWIAddPrompt } from './scripts/authors-note.js';
+import { NOTE_MODULE_NAME, initAuthorsNote, setFloatingPrompt, shouldWIAddPrompt } from './scripts/authors-note.js';
 import { registerPromptManagerMigration } from './scripts/PromptManager.js';
 import { getRegexedString, getRegexedStringBatchAsync, regex_placement } from './scripts/extensions/regex/engine.js';
 import { initLogprobs, saveLogprobsForActiveMessage } from './scripts/logprobs.js';
@@ -369,6 +364,7 @@ import { initCustomSelectedSamplers, validateDisabledSamplers } from './scripts/
 import { DragAndDropHandler } from './scripts/dragdrop.js';
 import { initializeShareTargetImport } from './scripts/share-target-import.js';
 import { INTERACTABLE_CONTROL_CLASS, initKeyboard } from './scripts/keyboard.js';
+import { CONTROL_SHELL_CLASS } from './scripts/legacy-controls.js';
 import { initDynamicStyles } from './scripts/dynamic-styles.js';
 import { initInputMarkdown } from './scripts/input-md-formatting.js';
 import { AbortReason } from './scripts/util/AbortReason.js';
@@ -393,7 +389,9 @@ import { captureItemizedPromptsSaveSnapshot, clearItemizedPrompts, deleteItemize
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
-import { initDomHandlers } from './scripts/dom-handlers.js';
+import { initSortableList } from './scripts/sortable-list.js';
+import { initDomHandlers, restoreNumericInput, showNumericAdjustments, setAriaRelation, keepFocus, ensureElementId } from './scripts/dom-handlers.js';
+import { makeKeyboardInteractable } from './scripts/legacy-controls.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
 import { initPopupMenu } from './scripts/popup-menu.js';
 import { createGenerationIdleGate } from './scripts/util/generation-idle-gate.js';
@@ -404,7 +402,7 @@ import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
 import { MessageFormatter } from './scripts/message-formatter.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
-import { createStartupStatusOverlay } from './scripts/tauri/startup/startup-status-overlay.js';
+import { createStartupStatusOverlay, showStartupFailure } from './scripts/tauri/startup/startup-status-overlay.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 // API OBJECT FOR EXTERNAL WIRING
@@ -670,7 +668,6 @@ export let characters = [];
  * @type {string|undefined} Yes, we hate it as much as you do.
  */
 export let this_chid;
-let saveCharactersPage = 0;
 export const default_avatar = 'img/ai4.png';
 export const system_avatar = 'img/five.png';
 export const comment_avatar = 'img/quill.png';
@@ -682,7 +679,6 @@ let optionsPopper = Popper.createPopper(document.getElementById('options_button'
 let exportPopper = Popper.createPopper(document.getElementById('export_button'), document.getElementById('export_format_popup'), {
     placement: 'left',
 });
-let isExportPopupOpen = false;
 
 // Saved here for performance reasons
 const messageTemplate = $('#message_template .mes');
@@ -866,13 +862,22 @@ function flushSessionState() {
 
 registerLifecycleFlushHandler('session-state', flushSessionState, { priority: -100 });
 
+/** @type {{ resetPage?: boolean, focus?: string }} */
+let characterListRenderIntent = {};
+
+/** Merge pending navigation with the next debounced list render. */
+export function requestCharacterListRender(intent) {
+    Object.assign(characterListRenderIntent, intent);
+    printCharactersDebounced();
+}
+
 /**
  * Prints the character list in a debounced fashion without blocking, with a delay of 100 milliseconds.
  * Use this function instead of a direct `printCharacters()` whenever the reprinting of the character list is not the primary focus.
  *
  * The printing will also always reprint all filter options of the global list, to keep them up to date.
  */
-export const printCharactersDebounced = debounce(() => { printCharacters(false); }, DEFAULT_PRINT_TIMEOUT);
+export const printCharactersDebounced = debounce(() => { printCharacters(); }, DEFAULT_PRINT_TIMEOUT);
 
 export { extension_prompt_types, extension_prompt_roles };
 
@@ -937,12 +942,20 @@ export function getCurrentChatId() {
     }
 }
 
+/** Whether this owner's specific chat file is currently open. */
+export function isChatOpen({ avatar, groupId }, fileName) {
+    const ownerSelected = groupId
+        ? selected_group === groupId
+        : !selected_group && characters[this_chid]?.avatar === avatar;
+    return ownerSelected && getCurrentChatId() === fileName;
+}
+
 export const talkativeness_default = 0.5;
 export const depth_prompt_depth_default = 4;
 export const depth_prompt_role_default = 'system';
-const per_page_default = 50;
+const characterPagination = { storageKey: 'Characters_PerPage', defaultPageSize: 50 };
 
-var is_advanced_char_open = false;
+let characterPopupOpener = null;
 
 /**
  * The type of the right menu
@@ -988,7 +1001,6 @@ export const ANIMATION_DURATION_DEFAULT = 125;
 export let animation_duration = ANIMATION_DURATION_DEFAULT;
 export let animation_easing = 'ease-in-out';
 let popup_type = '';
-let chat_file_for_del = '';
 export let online_status = 'no_connection';
 
 export let is_send_press = false; //Send generation
@@ -1034,7 +1046,9 @@ export let active_character = '';
 /** The tag of the active group. (Coincidentally also the id) */
 export let active_group = '';
 
-export const entitiesFilter = new FilterHelper(printCharactersDebounced);
+export const entitiesFilter = new FilterHelper(() => {
+    requestCharacterListRender({ resetPage: true });
+});
 
 export function getRequestHeaders({ omitContentType = false } = {}) {
     const headers = {
@@ -1122,12 +1136,11 @@ async function firstLoadInit() {
 
     const nextPaint = () => new Promise((resolve) => requestAnimationFrame(resolve));
 
-    const hostReadyPromise = waitForTauriMainReady({ failFast: true });
-
     perfMark('tt:startup:start');
 
     try {
-        setStage('shell', '启动中：渲染界面…（扩展稍后加载）');
+        await initLocales();
+        setStage('shell', t`Starting: rendering the interface… (extensions load later)`);
         removePreloader();
         await nextPaint();
 
@@ -1141,8 +1154,8 @@ async function firstLoadInit() {
         applyBrowserFixes();
 
         // Ensure bridge/interceptors are installed before first /api/* calls.
-        setStage('core', '启动中：连接后端…');
-        await hostReadyPromise;
+        setStage('core', t`Starting: connecting to the backend…`);
+        await window.__TAURITAVERN_MAIN_READY__;
         const tauriTavernSettings = await getTauriTavernSettings();
         initializeChatVirtualization(tauriTavernSettings);
         initializeColdSwipes(tauriTavernSettings);
@@ -1163,7 +1176,7 @@ async function firstLoadInit() {
             fetchSettingsSnapshot(),
         ]);
 
-        setStage('core', '启动中：加载核心数据…');
+        setStage('core', t`Starting: loading core data…`);
         const clientVersionPromise = getClientVersion();
         await initSecrets();
         const [bootstrapMetadata, settingsSnapshot] = await startupDataPromise;
@@ -1183,7 +1196,6 @@ async function firstLoadInit() {
         primeSecretStateSnapshot(bootstrapMetadata.secret_state);
         await readSecretState();
         await clientVersionPromise;
-        await initLocales();
         initChatUtilities();
         initDefaultSlashCommands();
         initTextGenModels();
@@ -1193,7 +1205,7 @@ async function firstLoadInit() {
         initNovelAISettings();
         initSystemPrompts();
 
-        setStage('full', '启动中：加载扩展与可选模块…');
+        setStage('full', t`Starting: loading extensions and optional modules…`);
         initExtensions();
         initExtensionSlashCommands();
         ToolManager.initToolSlashCommands();
@@ -1308,6 +1320,9 @@ async function firstLoadInit() {
             }
         })();
 
+    } catch (error) {
+        showStartupFailure(error);
+        throw error;
     } finally {
         startupStatus.remove();
     }
@@ -1398,13 +1413,21 @@ export function setActiveGroup(entityOrKey) {
 }
 
 export function startStatusLoading() {
-    $('.api_loading').show();
-    $('.api_button').addClass('disabled');
+    const connect = document.activeElement.closest('.api_button');
+    $('.api_loading').removeClass('displayNone');
+    $('.api_button').addClass('disabled').attr({ 'aria-disabled': 'true', 'aria-busy': 'true' });
+    if (connect) connect.parentElement.querySelector('.api_loading')?.focus();
 }
 
 export function stopStatusLoading() {
-    $('.api_loading').hide();
-    $('.api_button').removeClass('disabled');
+    const cancel = document.activeElement.closest('.api_loading');
+    const connect = cancel?.parentElement.querySelector('.api_button');
+    $('.api_loading').addClass('displayNone');
+    $('.api_button').removeClass('disabled').attr('aria-disabled', 'false').removeAttr('aria-busy');
+    if (connect) {
+        makeKeyboardInteractable(connect);
+        connect.focus();
+    }
 }
 
 export function resultCheckStatus() {
@@ -1412,8 +1435,8 @@ export function resultCheckStatus() {
     stopStatusLoading();
 }
 
-async function getPersistedCharacterChats(characterId) {
-    const character = characters[characterId];
+async function getPersistedCharacterChats(avatar) {
+    const character = characters.find(character => character.avatar === avatar);
     if (!character) {
         return [];
     }
@@ -1467,6 +1490,7 @@ export async function selectCharacterById(id, { switchMenu = true, chatFile } = 
     if (characters[id] === undefined) {
         return;
     }
+    const avatar = characters[id].avatar;
 
     if (isChatSaving) {
         toastr.info(t`Please wait until the chat is saved before switching characters.`, t`Your chat is still saving...`);
@@ -1479,7 +1503,7 @@ export async function selectCharacterById(id, { switchMenu = true, chatFile } = 
 
     if (selected_group || String(this_chid) !== String(id) || chatFile !== undefined) {
         if (!is_send_press) {
-            const persistedChats = chatFile === undefined ? await getPersistedCharacterChats(id) : [];
+            const persistedChats = chatFile === undefined ? await getPersistedCharacterChats(avatar) : [];
             const allowNewChat = chatFile === undefined && persistedChats.length === 0;
             setCharacterId(undefined);
             setCharacterName('');
@@ -1505,11 +1529,12 @@ export async function selectCharacterById(id, { switchMenu = true, chatFile } = 
                 return;
             }
             if (chatFile !== undefined || targetChat !== previousChat) {
-                const persisted = await updateRemoteChatName(id, targetChat);
-                if (!persisted) {
-                    toastr.warning(t`The character's current chat could not be saved.`);
-                }
+                await updateRemoteChatName(characters.findIndex(character => character.avatar === avatar), targetChat).catch(error => {
+                    console.error('Chat opened, but its current-chat record could not be saved:', error);
+                    toastr.warning(error.message, t`Chat opened, but the character's current chat could not be saved.`);
+                });
             }
+            focusChatInput(ChatInputFocusIntent.NAVIGATION);
         }
     } else {
         //if clicked on character that was already selected
@@ -1523,8 +1548,15 @@ export async function selectCharacterById(id, { switchMenu = true, chatFile } = 
     }
 }
 
+export function setSelectedCharacterName(name) {
+    const header = document.getElementById('rm_button_selected_ch');
+    header.querySelector('h2').textContent = name;
+    header.querySelector(':scope > .sr-only').hidden = !name;
+}
+
 function getBackBlock() {
     const template = $('#bogus_folder_back_template .bogus_folder_select').clone();
+    setAriaRelation(template[0].querySelector(':scope > .sr-only'), 'labelledby', template.find('.ch_name')[0]);
     return template;
 }
 
@@ -1558,8 +1590,8 @@ function getCharacterBlock(item, id) {
     }
     // Populate the template
     const template = $('#character_template .character_select').clone();
-    template.attr({ 'data-chid': id, 'id': `CharID${id}` });
-    template.find('img').attr('src', this_avatar).attr('alt', item.name);
+    template.attr({ 'data-chid': id, 'data-avatar': item.avatar, 'id': `CharID${id}` });
+    template.find('img').attr('src', this_avatar);
     template.find('.avatar').attr('title', `[Character] ${item.name}\nFile: ${item.avatar}`);
     template.find('.ch_name').text(item.name).attr('title', `[Character] ${item.name}`);
     if (power_user.show_card_avatar_urls) {
@@ -1589,6 +1621,10 @@ function getCharacterBlock(item, id) {
         template.find('.character_version').hide();
     }
 
+    const primary = template[0].querySelector(':scope > .sr-only');
+    setAriaRelation(primary, 'labelledby', template.find('.ch_name')[0]);
+    if (auxFieldValue) setAriaRelation(primary, 'describedby', template.find('.character_version')[0]);
+
     // Display inline tags
     const tagsElement = template.find('.tags');
     printTagList(tagsElement, { forEntityOrKey: id, tagOptions: { isCharacterList: true } });
@@ -1606,13 +1642,14 @@ function getCharacterBlock(item, id) {
  * @param {boolean} fullRefresh - If true, the list is fully refreshed and the navigation is being reset
  */
 export async function printCharacters(fullRefresh = false) {
-    const storageKey = 'Characters_PerPage';
+    const renderIntent = characterListRenderIntent;
+    characterListRenderIntent = {};
+    fullRefresh ||= renderIntent.resetPage;
     const listId = '#rm_print_characters_block';
 
     let currentScrollTop = $(listId).scrollTop();
 
     if (fullRefresh) {
-        saveCharactersPage = 0;
         currentScrollTop = 0;
         await delay(1);
     }
@@ -1631,62 +1668,47 @@ export async function printCharacters(fullRefresh = false) {
 
     const entities = getEntitiesList({ doFilter: true });
 
-    const pageSize = Number(accountStorage.getItem(storageKey)) || per_page_default;
-    const sizeChangerOptions = [10, 25, 50, 100, 250, 500, 1000];
-    $('#rm_print_characters_pagination').pagination({
+    initPagination($('#rm_print_characters_pagination'), {
+        ...characterPagination,
+        sizeChangerOptions: [10, 25, 50, 100, 250, 500, 1000],
         dataSource: entities,
-        pageSize,
-        pageRange: 1,
-        pageNumber: saveCharactersPage || 1,
-        position: 'top',
-        showPageNumbers: false,
-        showSizeChanger: true,
-        prevText: '<',
-        nextText: '>',
-        formatNavigator: PAGINATION_TEMPLATE,
-        formatSizeChanger: renderPaginationDropdown(pageSize, sizeChangerOptions),
-        showNavigator: true,
+        pageNumber: fullRefresh ? 1 : undefined,
         callback: async function (/** @type {Entity[]} */ data) {
-            $(listId).empty();
-            if (power_user.bogus_folders && isBogusFolderOpen()) {
-                $(listId).append(getBackBlock());
-            }
-            if (!data.length) {
-                const emptyBlock = await getEmptyBlock();
-                $(listId).append(emptyBlock);
-            }
-            let displayCount = 0;
-            for (const i of data) {
-                switch (i.type) {
-                    case 'character':
-                        $(listId).append(getCharacterBlock(i.item, i.id));
-                        displayCount++;
-                        break;
-                    case 'group':
-                        $(listId).append(getGroupBlock(i.item));
-                        displayCount++;
-                        break;
-                    case 'tag':
-                        $(listId).append(getTagBlock(i.item, i.entities, i.hidden, i.isUseless));
-                        break;
-                }
-            }
-
+            const focusTarget = renderIntent.focus;
+            delete renderIntent.focus;
+            const displayCount = data.filter(entity => entity.type !== 'tag').length;
             const hidden = (characters.length + groups.length) - displayCount;
-            if (hidden > 0 && entitiesFilter.hasAnyFilter()) {
-                const hiddenBlock = await getHiddenBlock(hidden);
-                $(listId).append(hiddenBlock);
+            const emptyBlock = !data.length ? await getEmptyBlock() : null;
+            const hiddenBlock = hidden > 0 && entitiesFilter.hasAnyFilter() ? await getHiddenBlock(hidden) : null;
+            const write = () => {
+                $(listId).empty();
+                if (power_user.bogus_folders && isBogusFolderOpen()) $(listId).append(getBackBlock());
+                if (emptyBlock) $(listId).append(emptyBlock);
+                for (const entity of data) {
+                    switch (entity.type) {
+                        case 'character': $(listId).append(getCharacterBlock(entity.item, entity.id)); break;
+                        case 'group': $(listId).append(getGroupBlock(entity.item)); break;
+                        case 'tag': $(listId).append(getTagBlock(entity.item, entity.entities, entity.hidden, entity.isUseless)); break;
+                    }
+                }
+                if (hiddenBlock) $(listId).append(hiddenBlock);
+            };
+            if (focusTarget) {
+                write();
+                const target = document.querySelector(`${listId} > ${focusTarget} > .sr-only`)
+                    ?? document.querySelector(`${listId} > .${CONTROL_SHELL_CLASS} > .sr-only`)
+                    ?? document.getElementById('rm_button_search');
+                target.focus();
+            } else {
+                const retained = keepFocus(
+                    () => document.querySelectorAll(`${listId} > .${CONTROL_SHELL_CLASS}`),
+                    item => item.dataset.avatar ?? item.id,
+                    write,
+                );
+                if (!retained) document.getElementById('rm_button_search').focus();
             }
-            localizePagination($('#rm_print_characters_pagination'));
 
             eventSource.emit(event_types.CHARACTER_PAGE_LOADED);
-        },
-        afterSizeSelectorChange: function (e, size) {
-            accountStorage.setItem(storageKey, e.target.value);
-            paginationDropdownChangeHandler(e, size);
-        },
-        afterPaging: function (e) {
-            saveCharactersPage = e;
         },
         afterRender: function () {
             $(listId).scrollTop(currentScrollTop);
@@ -1954,102 +1976,95 @@ export async function getCharacters() {
     }
 }
 
-async function delChat(chatfile) {
-    const response = await fetch('/api/chats/delete', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            chatfile: chatfile,
-            avatar_url: characters[this_chid].avatar,
-        }),
-    });
-    if (response.ok === true) {
-        // choose another chat if current was deleted
-        const name = chatfile.replace('.jsonl', '');
-        if (name === characters[this_chid].chat) {
-            chat_metadata = {};
-            try {
-                await replaceCurrentChat();
-            } catch (error) {
-                console.error('Failed to open another chat after deletion:', error);
-                toastr.warning(t`The chat was deleted, but another chat could not be opened.`);
-            }
-        }
-        await eventSource.emit(event_types.CHAT_DELETED, name);
+/**
+ * Admit a change to the open chat's file: no write may land after it.
+ * @param {{ saveEdits: boolean }} options Save pending edits first, or discard them once queued writes settle
+ */
+export async function prepareCurrentChatFileChange({ saveEdits }) {
+    if (is_send_press || is_group_generating) throw new Error(t`Stop generation before deleting or renaming the current chat.`);
+    if (saveEdits) {
+        await saveChatConditional();
+        return;
     }
+    cancelDebouncedChatSave();
+    cancelDebouncedMetadataSave();
+    await enqueueChatSave(async () => {});
 }
 
 /**
- * Deletes a character chat by its name.
- * @param {string} characterId Character ID to delete chat for
- * @param {string} fileName Name of the chat file to delete (without .jsonl extension)
- * @returns {Promise<void>} A promise that resolves when the chat is deleted.
+ * Delete a character chat. A successful delete remains successful if selecting its replacement fails.
+ * @param {string} avatar Avatar file name, independent of the currently selected character
+ * @param {string} fileName Chat file stem (without .jsonl)
  */
-export async function deleteCharacterChatByName(characterId, fileName) {
-    // Make sure all the data is loaded.
-    await unshallowCharacter(characterId);
-
-    /** @type {Character} */
-    const character = characters[characterId];
-    if (!character) {
-        console.warn(`Character with ID ${characterId} not found.`);
-        return;
+export async function deleteCharacterChat(avatar, fileName) {
+    const characterId = characters.findIndex(character => character.avatar === avatar);
+    if (characterId === -1) throw new Error(`Character not found: ${avatar}`);
+    await unshallowCharacter(String(characterId));
+    if (isChatOpen({ avatar }, fileName)) {
+        await prepareCurrentChatFileChange({ saveEdits: false });
     }
 
     const response = await fetch('/api/chats/delete', {
         method: 'POST',
         headers: getRequestHeaders(),
-        body: JSON.stringify({
-            chatfile: `${fileName}.jsonl`,
-            avatar_url: character.avatar,
-        }),
+        body: JSON.stringify({ chatfile: `${fileName}.jsonl`, avatar_url: avatar }),
     });
+    if (!response.ok) throw new Error(`Could not delete chat "${fileName}": ${response.status} ${response.statusText}`);
 
-    if (!response.ok) {
-        console.error('Failed to delete chat for character.');
-        return;
+    try {
+        await replaceCurrentChat(avatar, fileName);
+    } catch (error) {
+        console.error('Chat deleted, but its replacement could not be selected:', error);
+        toastr.warning(error.message, t`Chat deleted, but another chat could not be selected.`);
     }
-
-    if (fileName === character.chat) {
-        try {
-            const chats = await getPersistedCharacterChats(characterId);
-            const newChatName = chats.length && typeof chats[0] === 'object' ? normalizeChatFileName(chats[0].file_name) : `${character.name} - ${humanizedDateTime()}`;
-            const persisted = await updateRemoteChatName(characterId, newChatName);
-            if (!persisted) {
-                toastr.warning(t`The chat was deleted, but the character's current chat could not be saved.`);
-            }
-        } catch (error) {
-            console.error('Failed to select another chat after deletion:', error);
-            toastr.warning(t`The chat was deleted, but another chat could not be selected.`);
-        }
-    }
-
     await eventSource.emit(event_types.CHAT_DELETED, fileName);
 }
 
-export async function replaceCurrentChat() {
-    const characterId = this_chid;
-    const chats = await getPersistedCharacterChats(characterId);
-    if (characterId !== this_chid) {
-        return;
-    }
+/**
+ * Deletes a character chat; the upstream entry point keyed by character index.
+ * @param {string|number} characterId Character index
+ * @param {string} fileName Chat file stem (without .jsonl)
+ */
+export async function deleteCharacterChatByName(characterId, fileName) {
+    await deleteCharacterChat(characters[characterId]?.avatar, fileName);
+}
 
-    const character = characters[characterId];
+/**
+ * Selects another chat after a character's current chat file was deleted, loading it when the deleted chat is open.
+ * @param {string} [avatar] Character avatar, defaults to the selected character
+ * @param {string} [fileName] Deleted chat file stem, defaults to that character's current chat
+ */
+export async function replaceCurrentChat(avatar = characters[this_chid]?.avatar, fileName) {
+    const owner = characters.find(character => character.avatar === avatar);
+    if (!owner) throw new Error(`Character not found: ${avatar}`);
+    fileName ??= owner.chat;
+    if (owner.chat !== fileName) return;
+
+    const chats = await getPersistedCharacterChats(avatar);
+    if (isChatOpen({ avatar }, fileName)) {
+        await clearChat({ clearData: true });
+    }
+    const character = characters.find(character => character.avatar === avatar);
+    // Navigation during preparation owns the newer current-chat choice.
+    if (character?.chat !== fileName) return;
+
     const existingChat = chats[0];
-    const useExistingChat = typeof existingChat?.file_name === 'string';
-    const newChatName = useExistingChat
-        ? normalizeChatFileName(existingChat.file_name)
-        : `${character.name} - ${humanizedDateTime()}`;
-
-    await clearChat({ clearData: true });
-    if (characterId !== this_chid) {
-        return;
+    const nextName = existingChat ? normalizeChatFileName(existingChat.file_name) : `${character.name} - ${humanizedDateTime()}`;
+    const wasOpen = isChatOpen({ avatar }, fileName);
+    if (wasOpen) {
+        chat_metadata = {};
+        character.chat = nextName;
+        $('#selected_chat_pole').val(nextName);
+        await getChat({ allowNewChat: !existingChat });
     }
-
-    characters[characterId].chat = newChatName;
-    $('#selected_chat_pole').val(newChatName);
-    saveCharacterDebounced();
-    await getChat({ allowNewChat: !useExistingChat });
+    // Persist only after the replacement owns the in-memory chat.
+    const characterId = characters.findIndex(character => character.avatar === avatar);
+    if (!wasOpen || characters[characterId]?.chat === nextName) {
+        await updateRemoteChatName(characterId, nextName).catch(error => {
+            console.error('Chat deleted, but its current-chat record could not be saved:', error);
+            toastr.warning(error.message, t`Chat deleted, but the character's current chat could not be saved.`);
+        });
+    }
 }
 
 export async function showMoreMessages(messagesToLoad = null) {
@@ -2242,25 +2257,26 @@ export async function deleteLastMessage() {
 
 /**
  * Deletes a message from the chat by its ID, optionally asking for confirmation.
- * @param {number} id The ID of the message to delete.
+ * @param {number|string} id The ID of the message to delete.
  * @param {number} [swipeDeletionIndex] Deletes the swipe with that index.
  * @param {boolean} [askConfirmation=false] Whether to ask for confirmation before deleting.
  */
 export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfirmation = false) {
-    if (!Number.isInteger(id) || id < 0 || id >= chat.length) {
+    const index = typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : id;
+    if (!Number.isInteger(index) || index < 0 || index >= chat.length) {
         throw new RangeError(`Invalid message id: ${String(id)}`);
     }
-    const element = chatSurface.getMessageElement(id);
+    const element = chatSurface.getMessageElement(index);
     const ownedFocus = element?.contains(document.activeElement);
     const canDeleteSwipe = swipeDeletionIndex !== undefined && swipeDeletionIndex !== null;
     if (canDeleteSwipe) {
         if (swipeDeletionIndex < 0) {
             throw new Error('Swipe index cannot be negative');
         }
-        if (!Array.isArray(chat[id].swipes)) {
+        if (!Array.isArray(chat[index].swipes)) {
             throw new Error('Message has no swipes to delete');
         }
-        if (chat[id].swipes.length <= swipeDeletionIndex) {
+        if (chat[index].swipes.length <= swipeDeletionIndex) {
             throw new Error('Swipe index out of bounds');
         }
     }
@@ -2280,13 +2296,13 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
     }
 
     if (deleteOnlySwipe) {
-        await deleteSwipe(swipeDeletionIndex, id);
+        await deleteSwipe(swipeDeletionIndex, index);
         return;
     }
 
-    const deletedMessage = chat[id];
-    deleteItemizedPromptForMessage(id);
-    chat.splice(id, 1);
+    const deletedMessage = chat[index];
+    deleteItemizedPromptForMessage(index);
+    chat.splice(index, 1);
 
     chat_metadata.tainted = true;
 
@@ -2294,14 +2310,14 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
     saveChatDebounced();
     void cleanupDeletedMessageStates([deletedMessage]);
 
-    if (this_edit_mes_id === id) {
+    if (this_edit_mes_id === index) {
         this_edit_mes_id = undefined;
         syncChatSurfaceProjectionHold();
     }
 
     refreshActiveSwipeButtons();
 
-    if (ownedFocus && document.activeElement === document.body) focusMessageOrInput(id);
+    if (ownedFocus && document.activeElement === document.body) focusMessageOrInput(index);
     await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
 }
 
@@ -2440,11 +2456,11 @@ async function maybeSubmitAgentGuidanceFromComposer() {
 
     const text = getAgentGuidanceComposerText();
     const result = await Popup.show.confirm(
-        '是否引导Agent行为？',
-        '<p>这条内容会作为用户指引插入下一次 Agent 模型请求，不会作为普通聊天消息保存。</p>',
+        t`Guide the Agent?`,
+        `<p>${t`This text will be inserted as user guidance into the next Agent model request. It will not be saved as a regular chat message.`}</p>`,
         {
-            okButton: '是',
-            cancelButton: '否',
+            okButton: t`Yes`,
+            cancelButton: t`No`,
         },
     );
     if (result !== POPUP_RESULT.AFFIRMATIVE) {
@@ -3502,13 +3518,10 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     const root = messageElement[0];
     const author = root.querySelector('.name_text');
     const number = root.querySelector('.mesIDDisplay');
-    author.id ||= `message-author-${uuidv4()}`;
-    number.id ||= `message-number-${uuidv4()}`;
-    root.setAttribute('aria-labelledby', `${author.id} ${number.id}`);
+    setAriaRelation(root, 'labelledby', author, number);
     const actions = root.querySelector('.extraMesButtons');
-    actions.id ||= `message-actions-${uuidv4()}`;
-    root.querySelector('.extraMesButtonsHint').setAttribute('aria-controls', actions.id);
-    root.querySelector('.del_checkbox').setAttribute('aria-describedby', `${author.id} ${number.id}`);
+    setAriaRelation(root.querySelector('.extraMesButtonsHint'), 'controls', actions);
+    setAriaRelation(root.querySelector('.del_checkbox'), 'describedby', author, number);
     tokenCount && messageElement.find('.tokenCounterDisplay').text(`${tokenCount}t`);
     mes.title && messageElement.attr('title', mes.title);
     timerValue && messageElement.find('.mes_timer').attr('title', timerTitle).text(timerValue);
@@ -3889,28 +3902,27 @@ function cleanGroupMessage(getMessage) {
     return getMessage;
 }
 
-function addPersonaDescriptionExtensionPrompt() {
+function preparePersonaDescriptionExtensionPrompt() {
     const INJECT_TAG = 'PERSONA_DESCRIPTION';
     setExtensionPrompt(INJECT_TAG, '', extension_prompt_types.IN_PROMPT, 0);
 
     if (!power_user.persona_description || power_user.persona_description_position === persona_description_positions.NONE) {
-        return;
+        return null;
     }
 
     const promptPositions = [persona_description_positions.BOTTOM_AN, persona_description_positions.TOP_AN];
-
+    let authorsNote = null;
     if (promptPositions.includes(power_user.persona_description_position) && shouldWIAddPrompt) {
-        const originalAN = extension_prompts[NOTE_MODULE_NAME].value;
-        const ANWithDesc = power_user.persona_description_position === persona_description_positions.TOP_AN
-            ? `${power_user.persona_description}\n${originalAN}`
-            : `${originalAN}\n${power_user.persona_description}`;
-
-        setExtensionPrompt(NOTE_MODULE_NAME, ANWithDesc, chat_metadata[metadata_keys.position], chat_metadata[metadata_keys.depth], extension_settings.note.allowWIScan, chat_metadata[metadata_keys.role]);
+        authorsNote = {
+            before: power_user.persona_description_position === persona_description_positions.TOP_AN ? power_user.persona_description : '',
+            after: power_user.persona_description_position === persona_description_positions.BOTTOM_AN ? power_user.persona_description : '',
+        };
     }
 
     if (power_user.persona_description_position === persona_description_positions.AT_DEPTH) {
         setExtensionPrompt(INJECT_TAG, power_user.persona_description, extension_prompt_types.IN_CHAT, power_user.persona_description_depth, true, power_user.persona_description_role);
     }
+    return authorsNote;
 }
 
 /**
@@ -5387,8 +5399,21 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         ? inheritedLegacyMcpContext ?? await prepareLegacyMcpGenerationContext()
         : inheritedLegacyMcpContext;
     const legacyMcpToolRound = useLegacyMcpTools ? legacyMcpContext.createRound() : null;
-    let coreChat = chat.filter(x => !x.is_system
-        || (main_api === 'openai' && (x.role === 'tool' || Object.hasOwn(x.extra ?? {}, 'tool_invocations'))));
+    const hiddenToolOwners = new Map();
+    let coreChat = chat.filter(message => {
+        if (main_api === 'openai') {
+            if (message.role === 'tool') {
+                return hiddenToolOwners.get(message.tool_call_id) !== true;
+            }
+            if (!message.is_user && Array.isArray(message.tool_calls)) {
+                for (const call of message.tool_calls) {
+                    hiddenToolOwners.set(call.id, Boolean(message.is_system));
+                }
+            }
+        }
+        return !message.is_system
+            || (main_api === 'openai' && Object.hasOwn(message.extra ?? {}, 'tool_invocations'));
+    });
     if (type === 'swipe') {
         coreChat.pop();
     }
@@ -5525,7 +5550,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     // Set non-WI AN
     setFloatingPrompt();
 
-    // Add WI to prompt (and also inject WI to AN value via hijack)
+    // Add WI to prompt
     // Make quiet prompt available for WIAN
     setExtensionPrompt(inject_ids.QUIET_PROMPT, quiet_prompt || '', extension_prompt_types.IN_PROMPT, 0, true);
     const chatForWI = fullContextCoreChat.map(x => world_info_include_names ? `${x.name}: ${x.mes}` : x.mes).reverse();
@@ -5549,30 +5574,17 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples,
         worldInfoDepth, outletEntries, worldInfoActivation,
     } = worldInfo;
-    const includeActivatedWorldInfo = !agentMode || resolvedAgentContextPolicy.includeActivatedWorldInfo;
-    const promptWorldInfoBefore = includeActivatedWorldInfo ? worldInfoBefore : '';
-    const promptWorldInfoAfter = includeActivatedWorldInfo ? worldInfoAfter : '';
-
-    // Add message example WI
-    if (includeActivatedWorldInfo) {
-        for (const example of worldInfoExamples) {
-            const exampleMessage = example.content;
-
-            if (exampleMessage.length === 0) {
-                continue;
-            }
-
-            const formattedExample = baseChatReplace(exampleMessage);
-            const cleanedExample = parseMesExamples(formattedExample, isInstruct);
-
-            // Insert depending on before or after position
-            if (example.position === wi_anchor_position.before) {
-                mesExamplesArray.unshift(...cleanedExample);
-            } else {
-                mesExamplesArray.push(...cleanedExample);
-            }
+    let exampleBlocks = { before: [], character: mesExamplesArray, after: [] };
+    for (const example of worldInfoExamples) {
+        if (example.content.length === 0) continue;
+        const cleanedExample = parseMesExamples(baseChatReplace(example.content), isInstruct);
+        if (example.position === wi_anchor_position.before) {
+            exampleBlocks.before.unshift(...cleanedExample);
+        } else {
+            exampleBlocks.after.push(...cleanedExample);
         }
     }
+    mesExamplesArray = [...exampleBlocks.before, ...exampleBlocks.character, ...exampleBlocks.after];
 
     // At this point, the raw message examples can be created
     const mesExamplesRawArray = [...mesExamplesArray];
@@ -5581,7 +5593,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         mesExamplesArray = formatInstructModeExamples(mesExamplesArray, name1, name2);
     }
 
-    if (includeActivatedWorldInfo && skipWIAN !== true) {
+    if (skipWIAN !== true) {
         console.log('skipWIAN not active, adding WIAN');
         // Add all depth WI entries to prompt
         flushWIInjections();
@@ -5597,14 +5609,26 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             });
         }
     } else {
-        if (agentMode && !includeActivatedWorldInfo) {
-            flushWIInjections();
-        }
-        console.log(agentMode && !includeActivatedWorldInfo ? 'skipping WIAN by Agent context policy' : 'skipping WIAN');
+        console.log('skipping WIAN');
     }
 
     // Add persona description to prompt
-    addPersonaDescriptionExtensionPrompt();
+    const personaAuthorsNote = preparePersonaDescriptionExtensionPrompt();
+    const worldInfoAuthorsNote = worldInfo.anBefore.length || worldInfo.anAfter.length
+        ? { before: worldInfo.anBefore.join('\n'), after: worldInfo.anAfter.join('\n') }
+        : null;
+    const authorsNote = extension_prompts[NOTE_MODULE_NAME];
+    const authorsNoteAdditions = shouldWIAddPrompt && (worldInfoAuthorsNote || personaAuthorsNote) ? {
+        position: authorsNote.position,
+        depth: authorsNote.depth,
+        role: authorsNote.role,
+        worldInfo: worldInfoAuthorsNote,
+        persona: personaAuthorsNote,
+    } : null;
+    if (!agentMode && authorsNoteAdditions) {
+        const note = composeAuthorsNote(authorsNote, authorsNoteAdditions);
+        setExtensionPrompt(NOTE_MODULE_NAME, note.value, note.position, note.depth, extension_settings.note.allowWIScan, note.role);
+    }
 
     // Prepare the system prompt for Text Completion APIs
     if (main_api !== 'openai') {
@@ -5631,10 +5655,10 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         system: system,
         char: name2,
         user: name1,
-        wiBefore: promptWorldInfoBefore,
-        wiAfter: promptWorldInfoAfter,
-        loreBefore: promptWorldInfoBefore,
-        loreAfter: promptWorldInfoAfter,
+        wiBefore: worldInfoBefore,
+        wiAfter: worldInfoAfter,
+        loreBefore: worldInfoBefore,
+        loreAfter: worldInfoAfter,
         anchorBefore: beforeScenarioAnchor.trim(),
         anchorAfter: afterScenarioAnchor.trim(),
         mesExamples: mesExamplesArray.join(''),
@@ -5660,6 +5684,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     // Story string rendered, safe to remove
     if (power_user.strip_examples) {
         mesExamplesArray = [];
+        exampleBlocks = { before: [], character: [], after: [] };
     }
 
     // Inject all Depth prompts. Chat Completion does it separately
@@ -5751,6 +5776,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     }
 
     let oaiMessages = [];
+    let oaiExampleBlocks = null;
     let oaiMessageExamples = [];
 
     if (main_api === 'openai') {
@@ -5758,7 +5784,12 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             coreChat,
             stripOldToolCalls,
         );
-        oaiMessageExamples = setOpenAIMessageExamples(mesExamplesArray);
+        oaiExampleBlocks = {
+            before: setOpenAIMessageExamples(exampleBlocks.before),
+            character: setOpenAIMessageExamples(exampleBlocks.character),
+            after: setOpenAIMessageExamples(exampleBlocks.after),
+        };
+        oaiMessageExamples = [...oaiExampleBlocks.before, ...oaiExampleBlocks.character, ...oaiExampleBlocks.after];
     }
 
     // hack for regeneration of the first message
@@ -6142,8 +6173,8 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             scenario,
             char: name2,
             user: name1,
-            worldInfoBefore: promptWorldInfoBefore,
-            worldInfoAfter: promptWorldInfoAfter,
+            worldInfoBefore,
+            worldInfoAfter,
             beforeScenarioAnchor,
             afterScenarioAnchor,
             storyString,
@@ -6218,8 +6249,8 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 charDescription: description,
                 charPersonality: personality,
                 scenario: scenario,
-                worldInfoBefore: promptWorldInfoBefore,
-                worldInfoAfter: promptWorldInfoAfter,
+                worldInfoBefore,
+                worldInfoAfter,
                 extensionPrompts: extensionPromptSnapshot,
                 bias: promptBias,
                 type: type,
@@ -6231,18 +6262,34 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
                 messages: oaiMessages,
                 messageExamples: oaiMessageExamples,
             };
+            let workingInputs = promptInputs;
+            if (agentMode) {
+                // Sealed after GENERATE_AFTER_DATA; must stay unprojected.
+                agentPromptInputs = {
+                    ...promptInputs,
+                    messageExamples: oaiExampleBlocks.character,
+                    worldInfoExamples: { before: oaiExampleBlocks.before, after: oaiExampleBlocks.after },
+                    authorsNoteAdditions,
+                };
+                workingInputs = projectAgentPromptInputs(agentPromptInputs, resolvedAgentContextPolicy);
+                // Live {{outlet}} reads globals, which must hold the root's projected WI injections.
+                flushWIInjections();
+                for (const [key, prompt] of Object.entries(workingInputs.extensionPrompts)) {
+                    if (isWorldInfoInjection(key)) {
+                        setExtensionPrompt(key, prompt.value, prompt.position, prompt.depth, prompt.scan, prompt.role);
+                    }
+                }
+            }
             const [prompt, counts, evaluatedToolData] = await prepareOpenAIMessages({
-                ...promptInputs,
+                ...workingInputs,
                 allowToolCalls: canAdvertiseToolCalls,
                 agentMode,
-                agentContextPolicy: resolvedAgentContextPolicy,
                 agentSystemPrompt: resolvedAgentSystemPrompt,
                 legacyMcpToolRound,
                 quietToolRequest,
             }, dryRun);
             toolData = evaluatedToolData;
             generate_data = { prompt: prompt };
-            if (agentMode) agentPromptInputs = promptInputs;
 
             // TODO: move these side-effects somewhere else, so this switch-case solely sets generate_data
             // counts will return false if the user has not enabled the token breakdown feature
@@ -6264,9 +6311,15 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     if (agentMode) {
         const context = captureMacroContext();
         context.state.lastGenerationType = type || 'normal';
+        const settings = structuredClone(oai_settings);
+        const currentPreset = {
+            apiId: 'openai',
+            name: settings.preset_settings_openai,
+            settings: getChatCompletionPreset(settings),
+        };
         const currentModelConnection = await buildCurrentModelConnectionSnapshot({
-            settings: oai_settings,
-            model: getChatCompletionModel(oai_settings),
+            settings,
+            model: getChatCompletionModel(settings),
             secretKey: resolveSecretKey(),
             secretState: secret_state,
         });
@@ -6274,6 +6327,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             generationType: type,
             promptInputs: agentPromptInputs,
             worldInfoActivation,
+            currentPreset,
             currentModelConnection,
         }, context, buildAgentReadOnlyMacros(context, characterFields, characterExamples)));
     }
@@ -6645,55 +6699,37 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
         jsonSchema,
     });
     let payload;
-    let snapshotMetadata;
+    let snapshotInputs;
     let generationIntent;
     let runFrozenRunInputSnapshot = frozenRunInputSnapshot;
 
-    if (promptAssembly?.mode === 'currentPromptSnapshot') {
-        const settings = await buildSettingsWithCurrentModelConnectionSnapshot(
-            oai_settings,
-            frozenRunInputSnapshot.currentModelConnection,
-        );
-        const model = getChatCompletionModel(settings);
-        if (!model) {
-            throw new Error('agent.model_required: current chat-completion source did not resolve a model');
-        }
-
-        const { generate_data: chatCompletionPayload } = await createGenerationParameters(
-            settings,
-            model,
-            type,
-            structuredClone(messages),
-            {
-                jsonSchema, agentMode: true,
-                macroContext: createChatCompletionMacroContext(
-                    createMacroContextFromSnapshot(frozenRunInputSnapshot), settings, model),
+    if (promptAssembly.mode === 'currentPromptSnapshot') {
+        const prepared = await prepareCurrentPromptPayload({
+            currentPromptSnapshotSeed: {
+                generationType: type,
+                messages,
+                contextPolicy: agentContextPolicy,
+                jsonSchema,
+                worldInfoActivation: frozenRunInputSnapshot.worldInfoActivation,
             },
-        );
-
-        assertAgentPromptSnapshotHasNoExternalTools(chatCompletionPayload);
-        payload = chatCompletionPayload;
-        snapshotMetadata = {
-            contextPolicy: agentContextPolicy,
-            ...(frozenRunInputSnapshot.worldInfoActivation ? { worldInfoActivation: frozenRunInputSnapshot.worldInfoActivation } : {}),
-        };
+            frozenRunInputSnapshot,
+        });
+        payload = prepared.payload;
+        snapshotInputs = prepared.snapshotInputs;
         generationIntent = {
+            ...prepared.generationIntent,
             source: 'legacy-generate-live-handoff',
-            generationType: type,
-            chatCompletionSource: chatCompletionPayload.chat_completion_source,
-            model: chatCompletionPayload.model,
             contextPolicy: agentContextPolicy,
         };
-    } else if (promptAssembly?.mode === 'frontendPromptAssembly') {
+    } else if (promptAssembly.mode === 'frontendPromptAssembly') {
         const assembled = await buildPromptAssemblyPayload(promptAssembly.request);
         payload = assembled.payload;
-        snapshotMetadata = assembled.snapshotMetadata;
-        runFrozenRunInputSnapshot = assembled.frozenRunInputSnapshot ?? frozenRunInputSnapshot;
+        snapshotInputs = assembled.snapshotInputs;
+        runFrozenRunInputSnapshot = assembled.frozenRunInputSnapshot;
         generationIntent = {
             ...assembled.generationIntent,
-            source: 'frontend-prompt-assembly-broker',
             parentSource: 'legacy-generate-live-handoff',
-            contextPolicy: snapshotMetadata.contextPolicy,
+            contextPolicy: snapshotInputs.contextPolicy,
             promptAssembly: promptAssembly.assembly,
         };
     } else {
@@ -6702,7 +6738,7 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
 
     // Extensions finish editing the provider payload before it becomes canonical Agent input.
     await eventSource.emit(event_types.CHAT_COMPLETION_SETTINGS_READY, payload);
-    const promptSnapshot = createAgentPromptSnapshot(payload, snapshotMetadata);
+    const promptSnapshot = createAgentPromptSnapshot(payload, snapshotInputs);
 
     return startAndWaitForAgentRun({
         generationType: type,
@@ -6714,7 +6750,7 @@ async function startAgentRunFromGeneratedPrompt({ type, generateData, jsonSchema
     });
 }
 
-export async function resumeAgentRunInChat({ runId, generationType, additionalRounds = 0, checkpoint, revisionGuidance, abortController: commandAbortController }) {
+export async function resumeAgentRunInChat({ runId, generationType, checkpoint, revisionGuidance, abortController: commandAbortController }) {
     if (is_send_press || is_group_generating || hasActiveAgentRun()) {
         throw new Error('agent.resume_generation_active: wait for the current generation to finish');
     }
@@ -6727,7 +6763,7 @@ export async function resumeAgentRunInChat({ runId, generationType, additionalRo
         generation_started = new Date();
         deactivateSendButtons();
         await eventSource.emit(event_types.GENERATION_STARTED, generationType, { agentResume: true, runId }, false);
-        return await resumeAndWaitForAgentRun({ runId, additionalRounds, checkpoint, revisionGuidance }, commandAbortController);
+        return await resumeAndWaitForAgentRun({ runId, checkpoint, revisionGuidance }, commandAbortController);
     } finally {
         unblockGeneration(generationType);
         await exitGeneration();
@@ -6885,29 +6921,6 @@ async function pruneAgentPersistentStatesAfterDeletion(deletedStateIds, chatRef)
     await agentApi.pruneChatPersistentStates({ candidateStateIds, chatRef });
 }
 
-function assertAgentPromptSnapshotHasNoExternalTools(payload) {
-    const tools = payload?.tools;
-    if (Array.isArray(tools) && tools.length > 0) {
-        throw new Error('agent.external_tools_unsupported: Agent runtime owns the tool registry');
-    }
-    if (Object.hasOwn(payload || {}, 'tool_choice')) {
-        throw new Error('agent.external_tool_choice_unsupported: Agent runtime owns tool choice');
-    }
-
-    const messages = payload?.messages;
-    if (!Array.isArray(messages)) {
-        throw new Error('agent.prompt_snapshot_messages_required: chat-completion payload missing messages');
-    }
-    const hasToolTurn = messages.some((message) => {
-        const role = String(message?.role || '').toLowerCase();
-        return role === 'tool'
-            || (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0);
-    });
-    if (hasToolTurn) {
-        throw new Error('agent.external_tool_turns_unsupported: prompt snapshot already contains tool turns');
-    }
-}
-
 /**
  * Stops the generation and any streaming if it is currently running.
  */
@@ -6993,11 +7006,8 @@ async function doChatInject(messages, isContinue) {
 }
 
 function flushWIInjections() {
-    const depthPrefix = inject_ids.CUSTOM_WI_DEPTH;
-    const outletPrefix = inject_ids.CUSTOM_WI_OUTLET('');
-
     for (const key of Object.keys(extension_prompts)) {
-        if (key.startsWith(depthPrefix) || key.startsWith(outletPrefix)) {
+        if (isWorldInfoInjection(key)) {
             delete extension_prompts[key];
         }
     }
@@ -7387,7 +7397,7 @@ export async function duplicateCharacter({ avatar = null, silent = false } = {})
     // Show confirmation unless silent
     if (!silent) {
         const confirmMessage = $(await renderTemplateAsync('duplicateConfirm'));
-        const confirm = await callGenericPopup(confirmMessage, POPUP_TYPE.CONFIRM);
+        const confirm = await callGenericPopup(confirmMessage, POPUP_TYPE.CONFIRM, '', { label: confirmMessage.find('h3')[0] });
 
         if (!confirm) {
             console.log('User cancelled duplication');
@@ -8580,7 +8590,7 @@ export async function renameCharacter(name = null, { silent = false, renameChats
     }
 
     const oldAvatar = characters[this_chid].avatar;
-    const newValue = name || await callGenericPopup('<h3>' + t`New name:` + '</h3>', POPUP_TYPE.INPUT, characters[this_chid].name);
+    const newValue = name || await Popup.show.input(t`Rename Character`, '', characters[this_chid].name, { inputLabel: t`New name:` });
 
     if (!newValue) {
         toastr.warning(t`No character name provided.`, t`Rename Character`);
@@ -8902,7 +8912,7 @@ async function read_avatar_load(input) {
         const fileData = await getBase64Async(file);
 
         if (!power_user.never_resize_avatars) {
-            const dlg = new Popup('Set the crop position of the avatar image', POPUP_TYPE.CROP, '', { cropImage: fileData });
+            const dlg = new Popup('Set the crop position of the avatar image', POPUP_TYPE.CROP, '', { label: t`Set the crop position of the avatar image`, cropImage: fileData });
             const croppedImage = await dlg.show();
 
             if (!croppedImage) {
@@ -9014,7 +9024,13 @@ export function buildAvatarList(block, entities, { templateId = 'inline_avatar_t
         }
 
         if (interactable) {
-            avatarTemplate.addClass(INTERACTABLE_CONTROL_CLASS);
+            avatarTemplate.addClass(`${INTERACTABLE_CONTROL_CLASS} ${CONTROL_SHELL_CLASS}`);
+            const primary = document.createElement('button');
+            primary.type = 'button';
+            primary.className = 'sr-only';
+            primary.setAttribute('aria-label', entity.item.name);
+            avatarTemplate.prepend(primary);
+            avatarTemplate.find('img').attr('alt', '');
             avatarTemplate.toggleClass('character_select', entity.type === 'character');
             avatarTemplate.toggleClass('group_select', entity.type === 'group');
         }
@@ -9097,13 +9113,6 @@ export async function getChat({ allowNewChat = false } = {}) {
         await getChatResult({ allowNewChat });
         eventSource.emit(event_types.CHAT_LOADED, { detail: { id: this_chid, character: characters[this_chid] } });
 
-        // Focus on the textarea if not already focused on a visible text input
-        delay(debounce_timeout.short).then(() => {
-            if ($(document.activeElement).is('input:visible, textarea:visible')) {
-                return;
-            }
-            focusChatInput(ChatInputFocusIntent.NAVIGATION);
-        });
     } catch (error) {
         const currentCharacter = startedChid !== undefined ? characters[startedChid] : null;
         const stillActive = isStillSelected()
@@ -9181,12 +9190,15 @@ function getFirstMessage() {
 }
 
 /**
- * Opens an existing chat of the selected character.
- * @param {string} file_name Chat file name without extension
+ * Opens an existing chat, keeping its owner fixed while pending saves finish.
+ * @param {string} fileName Chat file name without extension
+ * @param {string} [avatar] Avatar file name, defaults to the character selected at invocation
  */
-export async function openCharacterChat(file_name) {
+export async function openCharacterChat(fileName, avatar = characters[this_chid]?.avatar) {
     await waitUntilCondition(() => !isChatSaving, debounce_timeout.extended, 10);
-    await selectCharacterById(this_chid, { chatFile: file_name });
+    const characterId = characters.findIndex(character => character.avatar === avatar);
+    if (characterId === -1) throw new Error(`Character not found: ${avatar}`);
+    await selectCharacterById(characterId, { chatFile: fileName });
 }
 
 ////////// OPTIMZED MAIN API CHANGE FUNCTION ////////////
@@ -9347,6 +9359,7 @@ function reloadLoop() {
 }
 
 async function applySettingsSnapshot(data, initLoaderHandle = null) {
+    const adjustments = [];
     if (data.result != 'file not find' && data.settings) {
         settings = JSON.parse(data.settings);
         captureSettingsSaveState(settings, data.tauritavern_settings_revision);
@@ -9362,22 +9375,25 @@ async function applySettingsSnapshot(data, initLoaderHandle = null) {
         await eventSource.emit(event_types.SETTINGS_LOADED_BEFORE, settings);
 
         //Load AI model config settings
-        amount_gen = settings.amount_gen;
-        if (settings.max_context !== undefined)
-            max_context = parseInt(settings.max_context);
+        amount_gen = settings.amount_gen ?? amount_gen;
+        max_context = parseInt(settings.max_context ?? max_context);
 
         swipes = settings.swipes !== undefined ? !!settings.swipes : true;  // enable swipes by default
         $('#swipes-checkbox').prop('checked', swipes); /// swipecode
         refreshSwipeButtons();
 
+        prepareGenerationControls(settings.power_user);
+        restoreNumericInput(document.getElementById('max_context'), max_context, adjustments, t`General`);
+        restoreNumericInput(document.getElementById('amount_gen'), amount_gen, adjustments, t`General`);
+
         // Kobold
-        loadKoboldSettings(data, settings.kai_settings ?? settings, settings);
+        loadKoboldSettings(data, settings.kai_settings ?? settings, settings, adjustments);
 
         // Novel
-        loadNovelSettings(data, settings.nai_settings ?? settings);
+        loadNovelSettings(data, settings.nai_settings ?? settings, adjustments);
 
         // TextGen
-        await loadTextGenSettings(data, settings);
+        await loadTextGenSettings(data, settings, adjustments);
 
         // OpenAI
         loadOpenAISettings(data, settings.oai_settings ?? settings);
@@ -9402,10 +9418,6 @@ async function applySettingsSnapshot(data, initLoaderHandle = null) {
 
         // Allow subscribers to mutate settings
         await eventSource.emit(event_types.SETTINGS_LOADED_AFTER, settings);
-
-        // Set context size after loading power user (may override the max value)
-        $('#max_context').val(max_context).trigger('input');
-        $('#amount_gen').val(amount_gen).trigger('input');
 
         //Load which API we are using
         if (settings.main_api == undefined) {
@@ -9471,6 +9483,7 @@ async function applySettingsSnapshot(data, initLoaderHandle = null) {
     await validateDisabledSamplers();
     settingsReady = true;
     await eventSource.emit(event_types.SETTINGS_LOADED);
+    showNumericAdjustments(adjustments);
 }
 
 //MARK: getSettings()
@@ -9577,21 +9590,20 @@ async function saveSettingsNow(loopCounter = 0) {
 /**
  * Sets the generation parameters from a preset object.
  * @param {{ genamt?: number, max_length?: number }} preset Preset object
+ * @param {import('./scripts/dom-handlers.js').NumericAdjustment[]} adjustments Changes collected by this operation.
  */
-export function setGenerationParamsFromPreset(preset) {
+export function setGenerationParamsFromPreset(preset, adjustments) {
     const needsUnlock = (preset.max_length ?? max_context) > MAX_CONTEXT_DEFAULT || (preset.genamt ?? amount_gen) > MAX_RESPONSE_DEFAULT;
     $('#max_context_unlocked').prop('checked', needsUnlock).trigger('change');
 
     if (preset.genamt !== undefined) {
         amount_gen = preset.genamt;
-        $('#amount_gen').val(amount_gen);
-        $('#amount_gen_counter').val(amount_gen).trigger('input');
+        restoreNumericInput(document.getElementById('amount_gen'), amount_gen, adjustments, t`General`);
     }
 
     if (preset.max_length !== undefined) {
         max_context = preset.max_length;
-        $('#max_context').val(max_context);
-        $('#max_context_counter').val(max_context).trigger('input');
+        restoreNumericInput(document.getElementById('max_context'), max_context, adjustments, t`General`);
     }
 }
 
@@ -10059,18 +10071,14 @@ export function getCurrentChatDetails() {
  * @param {string[]} hightlightNames - An array of chat names to highlight
  */
 export async function displayPastChats(hightlightNames = []) {
-    $('#select_chat_div').empty();
-    $('#select_chat_search').val('').off('input');
-
     const chatDetails = getCurrentChatDetails();
     const currentChat = chatDetails.sessionName;
-    const displayName = chatDetails.characterName;
-    const avatarImg = chatDetails.avatarImgURL;
-
-    await displayChats('', currentChat, displayName, avatarImg, selected_group, hightlightNames);
+    const groupId = selected_group;
+    const avatar = groupId ? null : characters[this_chid]?.avatar;
+    $('#ChatHistoryCharName').text(`${chatDetails.characterName} `);
 
     const debouncedDisplay = debounce((searchQuery) => {
-        displayChats(searchQuery, currentChat, displayName, avatarImg, selected_group, []);
+        displayChats(searchQuery, currentChat, avatar, groupId, []);
     });
 
     // Define the search input listener
@@ -10079,46 +10087,72 @@ export async function displayPastChats(hightlightNames = []) {
         debouncedDisplay(searchQuery);
     });
 
-    // On mobile hosts, let the user choose when to open the keyboard.
-    if (!isMobileHost()) {
-        setTimeout(function () {
-            const textSearchElement = $('#select_chat_search');
-            textSearchElement.trigger('click').trigger('focus').trigger('select');
-        }, 200);
-    }
-
+    await displayChats(String($('#select_chat_search').val()), currentChat, avatar, groupId, hightlightNames);
     addChatBackupsBrowser();
 }
 
-async function displayChats(searchQuery, currentChat, displayName, avatarImg, selected_group, highlightNames) {
+let chatHistoryOpener;
+
+/** Own the nonmodal history panel's visibility and initial focus. */
+export async function setChatHistoryOpen(open) {
+    const panel = document.getElementById('select_chat_popup');
+    const shadow = document.getElementById('shadow_select_chat_popup');
+    if (open === (shadow.style.display === 'block')) return;
+    const focusInside = panel.contains(document.activeElement);
+    if (open) {
+        chatHistoryOpener = document.activeElement;
+        $('#select_chat_div').empty();
+        $('#select_chat_search').val('');
+    }
+    shadow.style.display = open ? 'block' : 'none';
+    if (open) {
+        await displayPastChats();
+        if (shadow.style.display === 'block') {
+            (isMobileHost() ? panel : document.getElementById('select_chat_search')).focus();
+        }
+    } else if (focusInside && chatHistoryOpener?.isConnected) {
+        chatHistoryOpener.focus();
+    }
+}
+
+async function displayChats(searchQuery, currentChat, avatar, groupId, highlightNames) {
     try {
         const response = await fetch('/api/chats/search', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 query: searchQuery,
-                avatar_url: selected_group ? null : characters[this_chid].avatar,
-                group_id: selected_group || null,
+                avatar_url: avatar,
+                group_id: groupId || null,
             }),
         });
 
         if (!response.ok) {
-            throw new Error('Search failed');
+            throw new Error(`Could not search chats: ${response.status} ${response.statusText}`);
         }
 
         const filteredData = await response.json();
-        $('#select_chat_div').empty();
-
+        if (selected_group !== groupId || (!groupId && characters[this_chid]?.avatar !== avatar)) return;
         filteredData.sort((a, b) => sortMoments(timestampToMoment(a.last_mes), timestampToMoment(b.last_mes)));
 
-        for (const chat of filteredData) {
+        const items = filteredData.map(chat => {
             const isSelected = currentChat === chat.file_name;
             const template = $('#past_chat_template .select_chat_block_wrapper').clone();
+            template.attr({ 'data-avatar': avatar ?? '', 'data-group': groupId ?? '', 'data-file': chat.file_name });
             template.find('.select_chat_block').attr('file_name', chat.file_name);
-            template.find('.avatar img').attr('src', avatarImg);
             template.find('.select_chat_block_filename').text(chat.file_name);
+            const primary = template.find('.select_chat_block')[0].querySelector(':scope > .sr-only');
+            const name = template.find('.select_chat_block_filename')[0];
+            setAriaRelation(primary, 'labelledby', name);
+            setAriaRelation(primary, 'describedby', template.find('.select_chat_info')[0]);
+            template.find('button:not(.sr-only)').each((_, button) => setAriaRelation(button, 'labelledby', button, name));
+            if (isSelected) primary.setAttribute('aria-current', 'true');
             template.find('.chat_file_size').text(`(${chat.file_size},`);
-            template.find('.chat_messages_num').text(`${chat.message_count} 💬)`);
+            template.find('.chat_messages_num').empty().append(
+                $('<span>', { 'aria-hidden': 'true', text: `${chat.message_count} 💬` }),
+                $('<span>', { class: 'sr-only', text: t`Messages: ${chat.message_count}` }),
+                ')',
+            );
             template.find('.select_chat_block_mes').text(chat.preview_message);
             template.find('.PastChat_cross').attr('file_name', chat.file_name);
             template.find('.chat_messages_date').text(timestampToMoment(chat.last_mes).format('lll'));
@@ -10127,9 +10161,18 @@ async function displayChats(searchQuery, currentChat, displayName, avatarImg, se
                 template.find('.select_chat_block').attr('highlight', String(true));
             }
 
-            $('#select_chat_div').append(template);
-
-            if (Array.isArray(highlightNames) && highlightNames.includes(chat.file_name)) {
+            return template[0];
+        });
+        const retained = keepFocus(
+            () => document.querySelectorAll('#select_chat_div > .select_chat_block_wrapper'),
+            item => item.dataset.file,
+            () => document.getElementById('select_chat_div').replaceChildren(...items),
+        );
+        if (!retained) document.getElementById('select_chat_search').focus();
+        for (const item of items) {
+            const template = $(item);
+            const fileName = item.dataset.file;
+            if (Array.isArray(highlightNames) && highlightNames.includes(fileName)) {
                 const templateOffset = template.offset().top - template.parent().offset().top;
                 $('#select_chat_div').scrollTop(templateOffset);
                 flashHighlight(template, debounce_timeout.extended);
@@ -10137,7 +10180,7 @@ async function displayChats(searchQuery, currentChat, displayName, avatarImg, se
         }
     } catch (error) {
         console.error('Error loading chats:', error);
-        toastr.error('Could not load chat data. Try reloading the page.');
+        toastr.error(error.message, t`Chat history could not be loaded.`);
     }
 }
 
@@ -10208,8 +10251,7 @@ export function select_rm_info(type, charId, previousCharId = null) {
             }
 
             try {
-                const perPage = Number(accountStorage.getItem('Characters_PerPage')) || per_page_default;
-                const page = Math.floor(charIndex / perPage) + 1;
+                const page = getPageForItem(charIndex, characterPagination);
                 const selector = `#rm_print_characters_block [title*="${avatarFileName}"]`;
                 $('#rm_print_characters_pagination').pagination('go', page);
 
@@ -10240,8 +10282,7 @@ export function select_rm_info(type, charId, previousCharId = null) {
                 return;
             }
 
-            const perPage = Number(accountStorage.getItem('Characters_PerPage')) || per_page_default;
-            const page = Math.floor(charIndex / perPage) + 1;
+            const page = getPageForItem(charIndex, characterPagination);
             $('#rm_print_characters_pagination').pagination('go', page);
             const selector = `#rm_print_characters_block [grid="${charId}"]`;
             try {
@@ -10292,13 +10333,13 @@ export function select_selected_character(chid, { switchMenu = true } = {}) {
 
     // Don't update the navbar name if we're peeking the group member defs
     if (!selected_group) {
-        $('#rm_button_selected_ch').children('h2').text(characters[chid].name);
+        setSelectedCharacterName(characters[chid].name);
     }
 
     $('#add_avatar_button').val('');
 
     $('#character_popup-button-h3').text(characters[chid].name);
-    $('#character_name_pole').val(characters[chid].name);
+    $('#character_name_pole').val(characters[chid].name).removeAttr('aria-invalid');
     $('#description_textarea').val(characters[chid].description);
     $('#character_world').val(characters[chid].data?.extensions?.world || '');
     $('#creator_notes_textarea').val(characters[chid].data?.creator_notes || characters[chid].creatorcomment);
@@ -10383,7 +10424,7 @@ function select_rm_create({ switchMenu = true } = {}) {
     $('#rm_button_back').css('display', '');
     $('#character_import_button').css('display', '');
     $('#character_popup-button-h3').text('Create character');
-    $('#character_name_pole').val(create_save.name);
+    $('#character_name_pole').val(create_save.name).removeAttr('aria-invalid');
     $('#description_textarea').val(create_save.description);
     $('#character_world').val(create_save.world);
     $('#creator_notes_textarea').val(create_save.creator_notes);
@@ -10501,7 +10542,7 @@ function updateFavButtonState(state) {
     // TODO: This is bad and needs to be refactored.
     fav_ch_checked = state;
     $('#fav_checkbox').prop('checked', state);
-    $('#favorite_button').toggleClass('fav_on', state);
+    $('#favorite_button').toggleClass('fav_on', state).attr('aria-pressed', String(state));
     $('#favorite_button').toggleClass('fav_off', !state);
 }
 
@@ -10555,6 +10596,7 @@ export async function setCharacterSettingsOverrides() {
 
     // Wait for popup close/confirm.
     await callGenericPopup($template, POPUP_TYPE.TEXT, '', {
+        label: $template.find('h3')[0],
         wide: true,
         large: true,
         allowVerticalScrolling: true,
@@ -10990,7 +11032,9 @@ export async function saveMetadata() {
 }
 
 export async function saveChatConditional(commitReason = CHAT_COMMIT_REASON.MUTATION) {
+    // A full save includes all pending chat and metadata edits; later edits schedule new saves.
     cancelDebouncedChatSave();
+    cancelDebouncedMetadataSave();
 
     const savePromise = selected_group
         ? saveGroupChat(selected_group, true, false, commitReason)
@@ -11239,11 +11283,6 @@ export function cancelTtsPlay() {
     }
 }
 
-function updateAlternateGreetingsHintVisibility(root) {
-    const numberOfGreetings = root.find('.alternate_greetings_list .alternate_greeting').length;
-    $(root).find('.alternate_grettings_hint').toggle(numberOfGreetings == 0);
-}
-
 async function openCharacterWorldPopup() {
     const chid = $('#set_character_world').data('chid');
     if (menu_type != 'create' && chid === undefined) {
@@ -11278,12 +11317,14 @@ async function openCharacterWorldPopup() {
     // --- Populate Dropdowns ---
     // Append to primary dropdown.
     const primarySelect = template.find('.character_world_info_selector');
+    setAriaRelation(primarySelect[0], 'labelledby', template.find('h4')[0]);
     world_names.forEach((item, i) => {
         primarySelect.append(new Option(item, String(i), item === worldId, item === worldId));
     });
 
     // Append to extras dropdown.
     const extrasSelect = template.find('.character_extra_world_info_selector');
+    setAriaRelation(extrasSelect[0], 'labelledby', template.find('h4')[1]);
     const existingCharLore = world_info.charLore?.find((e) => e.name === fileName);
     world_names.forEach((item, i) => {
         const array = (menu_type == 'create' ? create_save.extra_books : existingCharLore?.extraBooks);
@@ -11292,6 +11333,7 @@ async function openCharacterWorldPopup() {
     });
 
     const popup = new Popup(template, POPUP_TYPE.TEXT, '', {
+        label: template.find('h3')[0],
         onOpen: function (popup) {
             const popupDialog = $(popup.dlg);
 
@@ -11316,124 +11358,75 @@ async function openCharacterWorldPopup() {
 
 function openAlternateGreetings() {
     const chid = $('.open_alternate_greetings').data('chid');
-
-    if (menu_type != 'create' && chid === undefined) {
+    if (menu_type !== 'create' && chid === undefined) {
         toastr.error('Does not have an Id for this character in editor menu.');
         return;
-    } else {
-        // If the character does not have alternate greetings, create an empty array
-        if (characters[chid] && !Array.isArray(characters[chid].data.alternate_greetings)) {
-            characters[chid].data.alternate_greetings = [];
-        }
+    }
+    if (characters[chid] && !Array.isArray(characters[chid].data.alternate_greetings)) {
+        characters[chid].data.alternate_greetings = [];
     }
 
     const template = $('#alternate_greetings_template .alternate_grettings').clone();
-    const getArray = () => menu_type == 'create' ? create_save.alternate_greetings : characters[chid].data.alternate_greetings;
+    const list = template.find('.alternate_greetings_list')[0];
+    const hint = template.find('.alternate_grettings_hint');
+    const addButton = template.find('.add_alternate_greeting')[0];
+    const getArray = () => menu_type === 'create' ? create_save.alternate_greetings : characters[chid].data.alternate_greetings;
+    const sorter = initSortableList(list, syncGreetings, item => item.querySelector('summary strong'));
+
+    function syncGreetings() {
+        const blocks = Array.from(list.children);
+        const array = getArray();
+        array.splice(0, array.length, ...blocks.map(block => block.querySelector('textarea').value));
+        blocks.forEach((block, index) => { block.querySelector('.greeting_index').textContent = String(index + 1); });
+        hint.toggle(blocks.length === 0);
+    }
+
+    function addGreeting(greeting) {
+        const block = $('#alternate_greeting_form_template .alternate_greeting').clone()[0];
+        const textarea = block.querySelector('textarea');
+        ensureElementId(textarea);
+        textarea.value = greeting;
+        textarea.addEventListener('input', () => {
+            getArray()[Array.from(list.children).indexOf(block)] = textarea.value;
+        });
+        block.querySelector('.editor_maximize').setAttribute('data-for', textarea.id);
+        const title = block.querySelector('summary strong');
+        setAriaRelation(textarea, 'labelledby', title);
+        setAriaRelation(textarea, 'describedby', template.find('.alternate_greetings_description')[0]);
+        for (const button of block.querySelectorAll('button')) setAriaRelation(button, 'labelledby', button, title);
+        const deleteButton = block.querySelector('.delete_alternate_greeting');
+        deleteButton.before(...sorter.addItem(block));
+        deleteButton.addEventListener('click', async () => {
+            if (!await Popup.show.confirm(t`Are you sure you want to delete this alternate greeting?`)) return;
+            const index = Array.from(list.children).indexOf(block);
+            block.remove();
+            syncGreetings();
+            const neighbor = list.children[Math.min(index, list.children.length - 1)];
+            (neighbor?.querySelector('summary') ?? addButton).focus();
+        });
+        list.append(block);
+        return textarea;
+    }
+
+    for (const greeting of getArray()) addGreeting(greeting);
+    syncGreetings();
+    addButton.addEventListener('click', () => {
+        const textarea = addGreeting('');
+        syncGreetings();
+        textarea.focus();
+        list.scrollTop = list.scrollHeight;
+    });
+
     const popup = new Popup(template, POPUP_TYPE.TEXT, '', {
+        label: template.find('h3')[0],
         wide: true,
         large: true,
         allowVerticalScrolling: true,
         onClose: async () => {
-            if (menu_type !== 'create') {
-                await createOrEditCharacter();
-            }
+            if (menu_type !== 'create') await createOrEditCharacter();
         },
     });
-
-    for (let index = 0; index < getArray().length; index++) {
-        addAlternateGreeting(template, getArray()[index], index, getArray, popup);
-    }
-
-    template.find('.add_alternate_greeting').on('click', function () {
-        const array = getArray();
-        const index = array.length;
-        array.push('');
-        addAlternateGreeting(template, '', index, getArray, popup);
-        updateAlternateGreetingsHintVisibility(template);
-        const list = template.find('.alternate_greetings_list');
-        list.scrollTop(list.prop('scrollHeight'));
-    });
-
     popup.show();
-    updateAlternateGreetingsHintVisibility(template);
-}
-
-/**
- * Adds an alternate greeting to the template.
- * @param {JQuery<HTMLElement>} template
- * @param {string} greeting
- * @param {number} index
- * @param {() => any[]} getArray
- * @param {Popup} popup
- */
-function addAlternateGreeting(template, greeting, index, getArray, popup) {
-    const greetingBlock = $('#alternate_greeting_form_template .alternate_greeting').clone();
-    greetingBlock.attr('data-index', index);
-    greetingBlock.find('.alternate_greeting_text')
-        .attr('id', `alternate_greeting_${index}`)
-        .on('input', async function () {
-            const value = $(this).val();
-            const array = getArray();
-            array[index] = value;
-        }).val(greeting);
-    greetingBlock.find('.editor_maximize').attr('data-for', `alternate_greeting_${index}`);
-    greetingBlock.find('.greeting_index').text(index + 1);
-    greetingBlock.find('.delete_alternate_greeting').on('click', async function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-
-        const confirm = await callGenericPopup(t`Are you sure you want to delete this alternate greeting?`, POPUP_TYPE.CONFIRM);
-        if (!confirm) {
-            return;
-        }
-
-        const array = getArray();
-        array.splice(index, 1);
-
-        // We need to reopen the popup to update the index numbers
-        await popup.complete(POPUP_RESULT.AFFIRMATIVE);
-        openAlternateGreetings();
-    });
-    greetingBlock.find('.move_up_alternate_greeting').on('click', function (event) {
-        handleMoveAlternateGreeting(event, -1);
-    });
-    greetingBlock.find('.move_down_alternate_greeting').on('click', function (event) {
-        handleMoveAlternateGreeting(event, 1);
-    });
-
-    /**
-     * Handles moving an alternate greeting up or down in the list.
-     * @param {JQuery.ClickEvent} event - The click event
-     * @param {number} direction - Direction to move: -1 for up, 1 for down
-     */
-    function handleMoveAlternateGreeting(event, direction) {
-        event.preventDefault();
-        event.stopPropagation();
-
-        const array = getArray();
-        const index = Number(greetingBlock.attr('data-index'));
-        const newIndex = index + direction;
-
-        // Check bounds
-        if (direction === -1 && index <= 0) {
-            return;
-        }
-        if (direction === 1 && index >= array.length - 1) {
-            return;
-        }
-
-        // Swap the greetings
-        [array[index], array[newIndex]] = [array[newIndex], array[index]];
-
-        // Update current greeting
-        greetingBlock.find('.alternate_greeting_text').val(array[index]);
-
-        // Update adjacent greeting
-        const adjacentGreetingBlock = template.find(`.alternate_greeting[data-index="${newIndex}"]`);
-        adjacentGreetingBlock.find('.alternate_greeting_text').val(array[newIndex]);
-    }
-
-    template.find('.alternate_greetings_list').append(greetingBlock);
 }
 
 /**
@@ -11461,6 +11454,7 @@ export async function createOrEditCharacter(e) {
 
     if ($('#form_create').attr('actiontype') == 'createcharacter') {
         if (String($('#character_name_pole').val()).length === 0) {
+            $('#character_name_pole').attr('aria-invalid', 'true').trigger('focus');
             toastr.error(t`Name is required`);
             return;
         }
@@ -11500,7 +11494,7 @@ export async function createOrEditCharacter(e) {
                 .filter(Boolean);
             const avatarId = await fetchResult.text();
 
-            $('#character_cross').trigger('click'); //closes the advanced character editing popup
+            setCharacterPopupOpen(false);
             const fields = [
                 { id: '#character_name_pole', callback: value => create_save.name = value },
                 { id: '#description_textarea', callback: value => create_save.description = value },
@@ -12171,47 +12165,38 @@ export async function swipe_right(event = null, { source, repeated, message } = 
 }
 
 /**
- * Imports supported files dropped into the app window.
+ * Imports character files and completes their lorebook adoption and post-import steps.
  * @param {File[]} files Array of files to process
  * @param {Map<File, string>} [data] Extra data to pass to the import function
  * @param {{ replacement?: boolean }} [options] Internal import intent
  * @returns {Promise<void>}
  */
 export async function processDroppedFiles(files, data = new Map(), { replacement = false } = {}) {
-    const allowedMimeTypes = [
-        'application/json',
-        'image/png',
-        'application/yaml',
-        'application/x-yaml',
-        'text/yaml',
-        'text/x-yaml',
-    ];
-
-    const allowedExtensions = [
-        'charx',
-        'byaf',
-    ];
+    if (is_group_generating || is_send_press) {
+        toastr.error(t`Cannot import characters while generating. Stop the request and try again.`, t`Import aborted`);
+        throw new Error('Cannot import character while generating');
+    }
+    try {
+        await flushWorldInfoSaves('import_character_lorebook');
+    } catch (error) {
+        toastr.error(error?.message, t`Import aborted`);
+        throw error;
+    }
 
     const avatarFileNames = [];
-    const replacements = [];
     pauseImportedCharacterAgentAssetQueue();
     try {
         for (const file of files) {
-            const extension = file.name.split('.').pop().toLowerCase();
-            if (allowedMimeTypes.some(x => file.type.startsWith(x)) || allowedExtensions.includes(extension)) {
-                const preservedName = data instanceof Map && data.get(file);
-                const imported = await importCharacter(file, { preserveFileName: preservedName, replacement });
-                if (imported) {
-                    avatarFileNames.push(imported.avatarFileName);
-                    if (imported.replaced) {
-                        replacements.push(imported.avatarFileName);
-                    }
+            const preservedName = data instanceof Map && data.get(file);
+            const imported = await importCharacter(file, { preserveFileName: preservedName, replacement });
+            if (imported) {
+                avatarFileNames.push(imported.avatarFileName);
+                try {
+                    await completeCharacterLorebookAdoption(imported.avatarFileName, imported.lorebook, { notify: imported.replaced });
+                } catch (error) {
+                    console.warn('Character imported, but its lorebook adoption could not be completed:', error);
+                    toastr.warning(error?.message, t`Character imported; lorebook import failed`);
                 }
-            } else {
-                if (replacement) {
-                    throw new Error(t`Unsupported file type: ` + file.name);
-                }
-                toastr.warning(t`Unsupported file type: ` + file.name);
             }
         }
 
@@ -12221,15 +12206,6 @@ export async function processDroppedFiles(files, data = new Map(), { replacement
             } catch (error) {
                 console.warn('Characters imported, but their tags could not be imported:', error);
                 toastr.warning(error?.message, t`Characters imported; tag import failed`);
-            }
-        }
-
-        for (const avatarFileName of replacements) {
-            try {
-                await resolveCharacterLorebookConflict(avatarFileName);
-            } catch (error) {
-                console.warn('Character replaced, but its World/Lorebook conflict could not be resolved:', error);
-                toastr.warning(error?.message, t`Character replaced; World/Lorebook follow-up failed`);
             }
         }
 
@@ -12277,21 +12253,16 @@ function selectImportedChar(charId) {
  * @param {File} file File to import
  * @param {object} [options] - Options
  * @param {string} [options.preserveFileName] Whether to preserve original file name
- * @param {Boolean} [options.importTags=false] Whether to import tags
  * @param {Boolean} [options.replacement=false] Whether this import was explicitly requested as a replacement
- * @returns {Promise<{ avatarFileName: string, replaced: boolean }|undefined>}
+ * @returns {Promise<TauriTavernCharacterImportResult|undefined>}
  */
-async function importCharacter(file, { preserveFileName = '', importTags = false, replacement = false } = {}) {
-    if (is_group_generating || is_send_press) {
-        toastr.error(t`Cannot import characters while generating. Stop the request and try again.`, t`Import aborted`);
-        throw new Error('Cannot import character while generating');
-    }
-
+async function importCharacter(file, { preserveFileName = '', replacement = false } = {}) {
     const ext = file.name.match(/\.(\w+)$/);
     if (!ext || !(['json', 'png', 'yaml', 'yml', 'charx', 'byaf'].includes(ext[1].toLowerCase()))) {
         if (replacement) {
             throw new Error(t`Unsupported file type: ` + file.name);
         }
+        toastr.warning(t`Unsupported file type: ` + file.name);
         return;
     }
 
@@ -12304,10 +12275,6 @@ async function importCharacter(file, { preserveFileName = '', importTags = false
     if (preserveFileName) formData.append('preserved_name', preserveFileName);
 
     try {
-        if (replacement) {
-            await flushWorldInfoSaves('replace_character_lorebook_conflict');
-        }
-
         const result = await fetch('/api/characters/import', {
             method: 'POST',
             body: formData,
@@ -12346,33 +12313,10 @@ async function importCharacter(file, { preserveFileName = '', importTags = false
 
             $('#character_search_bar').val('').trigger('input');
 
-            const linkedWorld = String(
-                data.character?.data?.extensions?.world
-                || data.character?.extensions?.world
-                || '',
-            );
-            if (linkedWorld && !world_names?.includes(linkedWorld)) {
-                try {
-                    await updateWorldInfoList();
-                } catch (error) {
-                    console.warn('Character imported, but the World/Lorebook list could not be refreshed:', error);
-                    toastr.warning(error?.message, t`Character imported; World/Lorebook refresh failed`);
-                }
-            }
-
             if (replaced) {
                 toastr.success(t`Character Replaced: ${String(data.file_name).replace('.png', '')}`);
             } else {
                 toastr.success(t`Character Created: ${String(data.file_name).replace('.png', '')}`);
-            }
-            if (importTags) {
-                try {
-                    await importCharactersTags([avatarFileName]);
-                    selectImportedChar(data.file_name);
-                } catch (error) {
-                    console.warn('Character imported, but its tags could not be imported:', error);
-                    toastr.warning(error?.message, t`Character imported; tag import failed`);
-                }
             }
             try {
                 enqueueImportedCharacterAgentAssetScan({
@@ -12385,7 +12329,7 @@ async function importCharacter(file, { preserveFileName = '', importTags = false
                 console.warn('Character imported, but its Agent assets could not be inspected:', error);
                 toastr.warning(error?.message, t`Character imported; Agent asset scan failed`);
             }
-            return { avatarFileName, replaced };
+            return { avatarFileName, replaced, lorebook: data.lorebook };
         }
 
         if (replacement) {
@@ -12424,222 +12368,26 @@ async function importFromURL(items, files) {
     }
 }
 
-async function readLorebookConflictResponse(response) {
-    const data = await response.clone().json().catch(() => null);
-    if (!response.ok || data?.error) {
-        const responseText = data ? '' : await response.text().catch(() => '');
-        const error = new Error(data?.details || data?.error || responseText || response.statusText);
-        Object.assign(error, { status: response.status });
-        throw error;
-    }
-    if (!data) {
-        throw new Error(t`Invalid World/Lorebook response.`);
-    }
-
-    return data;
-}
-
-async function getCharacterLorebookConflict(avatarFileName) {
-    const response = await fetch('/api/characters/lorebook-conflict', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({ avatar_url: avatarFileName }),
-        cache: 'no-cache',
-    });
-
-    return readLorebookConflictResponse(response);
-}
-
-async function syncResolvedWorldInfo(resolved) {
-    const worldName = String(resolved?.affected_world || '');
-    if (!worldName) {
-        throw new Error(t`The resolved World/Lorebook name is missing.`);
-    }
-
-    worldInfoCache.delete(worldName);
-    const worldData = await loadWorldInfo(worldName);
-    if (!worldData) {
-        throw new Error(t`Failed to load the resolved World/Lorebook.`);
-    }
-
-    if (resolved.world_written) {
-        await eventSource.emit(event_types.WORLDINFO_UPDATED, worldName, worldData);
-    }
-    if (!world_names?.includes(worldName)) {
-        await updateWorldInfoList();
-        if (!world_names?.includes(worldName)) {
-            throw new Error(t`Failed to refresh the World/Lorebook list.`);
-        }
-    }
-}
-
-async function applyCharacterLorebookConflictResolution(avatarFileName, resolution, conflictToken) {
-    if (!conflictToken) {
-        throw new Error(t`The World/Lorebook conflict token is missing.`);
-    }
-
-    const response = await fetch('/api/characters/resolve-lorebook-conflict', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            avatar_url: avatarFileName,
-            resolution,
-            conflict_token: conflictToken,
-        }),
-        cache: 'no-cache',
-    });
-    const resolved = await readLorebookConflictResponse(response);
-
-    if (resolved?.affected_world) {
-        try {
-            await syncResolvedWorldInfo(resolved);
-        } catch (error) {
-            console.error('Failed to synchronize resolved World/Lorebook state:', error);
-            toastr.error(error?.message, t`World/Lorebook refresh failed`);
-        }
-    } else if (resolution !== 'current') {
-        throw new Error(t`The resolved World/Lorebook name is missing.`);
-    }
-
-    const characterIndex = characters.findIndex(character => character.avatar === avatarFileName);
-    if (characterIndex !== -1) {
-        characters[characterIndex].data.extensions.world = String(resolved.world || '');
-        await getOneCharacter(avatarFileName);
-        if (String(characterIndex) === String(this_chid)) {
-            select_selected_character(this_chid, { switchMenu: false });
-        }
-    }
-
-    if (resolution === 'copy') {
-        const message = resolved.world
-            ? t`The embedded World/Lorebook was saved as '${String(resolved.affected_world)}'. The current link was kept.`
-            : t`The embedded World/Lorebook was saved as '${String(resolved.affected_world)}'. It was not bound automatically.`;
-        toastr.success(
-            message,
-            t`World/Lorebook saved`,
-        );
-    }
-}
-
-/**
- * @returns {Promise<boolean>} Whether the conflict is resolved; false when deferred.
- */
-async function resolveCharacterLorebookConflict(avatarFileName) {
-    while (true) {
-        const conflict = await getCharacterLorebookConflict(avatarFileName);
-        if (!conflict?.conflict) {
-            return true;
-        }
-
-        const conflictToken = String(conflict.conflict_token || '');
-        const worldName = String(conflict.world || '');
-        const embeddedName = String(conflict.embedded_name || t`Embedded World/Lorebook`);
-        const currentAvailable = Boolean(conflict.current_available);
-        const currentWorldLabel = worldName
-            ? `<code>${escapeHtml(worldName)}</code>`
-            : `<code>${t`missing`}</code>`;
-        const resolutionMessage = currentAvailable
-            ? `<div>${t`Using the embedded version overwrites the local World/Lorebook and may affect other characters.`}</div>
-               <div>${t`Saving a copy keeps the current link and stores the embedded version separately.`}</div>
-               <div>${t`Keeping the current version replaces the card's embedded copy with the local version.`}</div>`
-            : `<div>${t`The linked local World/Lorebook is missing. Use the embedded version to restore it, or save an unbound copy.`}</div>`;
-        const popupBody = `
-            <div>${t`The card's embedded World/Lorebook differs from the linked local version.`}</div>
-            <div class="m-t-1">${t`Current local World/Lorebook:`} ${currentWorldLabel}</div>
-            <div>${t`Embedded World/Lorebook:`} <code>${escapeHtml(embeddedName)}</code></div>
-            <div class="m-t-1">${resolutionMessage}</div>
-        `;
-        const customButtons = [
-            {
-                text: t`Use Embedded`,
-                result: POPUP_RESULT.CUSTOM1,
-            },
-            {
-                text: currentAvailable ? t`Keep Both` : t`Save a Copy`,
-                result: POPUP_RESULT.CUSTOM2,
-            },
-        ];
-        if (currentAvailable) {
-            customButtons.push({
-                text: t`Keep Local`,
-                result: POPUP_RESULT.CUSTOM3,
-            });
-        }
-
-        const result = await Popup.show.confirm(t`World/Lorebook conflict`, popupBody, {
-            okButton: false,
-            cancelButton: t`Not Now`,
-            customButtons,
-            defaultResult: currentAvailable ? POPUP_RESULT.CUSTOM2 : POPUP_RESULT.CUSTOM1,
-        });
-        const resolution = {
-            [POPUP_RESULT.CUSTOM1]: 'embedded',
-            [POPUP_RESULT.CUSTOM2]: 'copy',
-            [POPUP_RESULT.CUSTOM3]: 'current',
-        }[result];
-        if (!resolution) {
-            return false;
-        }
-
-        try {
-            await applyCharacterLorebookConflictResolution(
-                avatarFileName,
-                resolution,
-                conflictToken,
-            );
-            return true;
-        } catch (error) {
-            if (error?.status === 409) {
-                continue;
-            }
-            throw error;
-        }
-    }
-}
-
-async function resolveCharacterLorebookConflictBeforeNewChat() {
-    if (selected_group || this_chid === undefined) {
-        return true;
-    }
-
-    const character = characters[this_chid];
-    if (!character?.avatar) {
-        return true;
-    }
-
-    try {
-        await flushWorldInfoSaves('new_chat_lorebook_conflict_check');
-        return await resolveCharacterLorebookConflict(character.avatar);
-    } catch (error) {
-        console.error('Failed to resolve character lorebook conflict before new chat.', error);
-        toastr.error(error?.message || t`Failed to resolve the World/Lorebook conflict.`, t`New chat cancelled`);
-        return false;
-    }
-}
-
 export async function doNewChat({ deleteCurrentChat = false } = {}) {
     //Make a new chat for selected character
     if ((!selected_group && this_chid == undefined) || menu_type == 'create') {
         return;
     }
 
-    //Fix it; New chat doesn't create while open create character menu
-    await waitUntilCondition(() => !isChatSaving, debounce_timeout.extended, 10);
-    if (!await resolveCharacterLorebookConflictBeforeNewChat()) {
-        return;
+    if (!deleteCurrentChat) {
+        await waitUntilCondition(() => !isChatSaving, debounce_timeout.extended, 10);
+    }
+    const oldChat = getCurrentChatDetails()?.sessionName;
+    const groupId = selected_group;
+    const avatar = characters[this_chid]?.avatar;
+
+    if (deleteCurrentChat) {
+        await prepareCurrentChatFileChange({ saveEdits: true });
     }
     await clearChat({ clearData: true });
 
-    chat_file_for_del = getCurrentChatDetails()?.sessionName;
-
-    // Make it easier to find in backups
-    if (deleteCurrentChat) {
-        await saveChatConditional();
-    }
-
     if (selected_group) {
         await createNewGroupChat(selected_group);
-        if (deleteCurrentChat) await deleteGroupChat(selected_group, chat_file_for_del, { jumpToNewChat: false }); // don't jump, new chat was already created and jumped to above
     } else {
         //RossAscends: added character name to new chat filenames and replaced Date.now() with humanizedDateTime;
         chat_metadata = {};
@@ -12647,14 +12395,37 @@ export async function doNewChat({ deleteCurrentChat = false } = {}) {
         $('#selected_chat_pole').val(characters[this_chid].chat);
         await getChat({ allowNewChat: true });
         await createOrEditCharacter(new CustomEvent('newChat'));
-        if (deleteCurrentChat) await delChat(chat_file_for_del + '.jsonl');
     }
+    focusChatInput(ChatInputFocusIntent.NAVIGATION);
+    if (deleteCurrentChat) {
+        await (groupId ? deleteGroupChat(groupId, oldChat) : deleteCharacterChat(avatar, oldChat)).catch(error => {
+            console.error('Chat created, but the previous chat could not be deleted:', error);
+            toastr.warning(error.message, t`Chat created, but the previous chat could not be deleted.`);
+        });
+    }
+}
+
+/** Named prompts shared by recent chats and chat history. */
+export function confirmChatDelete(fileName) {
+    return Popup.show.confirm(t`Delete the Chat File?`, `<p>${escapeHtml(fileName)}</p>`, {
+        label: `${t`Delete the Chat File?`}: ${fileName}`,
+    });
+}
+
+export async function promptChatRename(fileName) {
+    const content = document.createElement('div');
+    content.innerHTML = await renderTemplateAsync('chatRename');
+    const name = await callGenericPopup(content, POPUP_TYPE.INPUT, fileName, {
+        label: `${t`Rename Chat`}: ${fileName}`,
+        inputLabel: content.querySelector('h3'),
+    });
+    return typeof name === 'string' && name.trim() && name !== fileName ? name : undefined;
 }
 
 /**
  * Renames a group or character chat.
  * @param {object} param Parameters for renaming chat
- * @param {string} [param.characterId] Character ID to rename chat for
+ * @param {string|number} [param.characterId] Character index, resolved to its avatar before any await
  * @param {string} [param.groupId] Group ID to rename chat for
  * @param {string} param.oldFileName Old name of the chat (no JSONL extension)
  * @param {string} param.newFileName New name for the chat (no JSONL extension)
@@ -12662,10 +12433,10 @@ export async function doNewChat({ deleteCurrentChat = false } = {}) {
  * @returns {Promise<string|undefined>} Backend-committed chat file stem, or undefined if the rename was cancelled/failed
  */
 export async function renameGroupOrCharacterChat({ characterId, groupId, oldFileName, newFileName, loader: showLoader }) {
-    const currentChatId = getCurrentChatId();
+    const avatar = characters[characterId]?.avatar;
     const body = {
         is_group: !!groupId,
-        avatar_url: characters[characterId]?.avatar,
+        avatar_url: avatar,
         original_file: `${oldFileName}.jsonl`,
         renamed_file: `${newFileName.trim()}.jsonl`,
     };
@@ -12687,6 +12458,10 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
     }) : null;
 
     try {
+        if (!groupId && !avatar) throw new Error(`Character not found: ${characterId}`);
+        if (isChatOpen({ avatar, groupId }, oldFileName)) {
+            await prepareCurrentChatFileChange({ saveEdits: true });
+        }
         const response = await fetch('/api/chats/rename', {
             method: 'POST',
             body: JSON.stringify(body),
@@ -12704,17 +12479,24 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
         }
 
         const committedFileName = data.sanitizedFileName;
+        const wasOpen = isChatOpen({ avatar, groupId }, oldFileName);
 
+        const renamedCharacterId = characters.findIndex(character => character.avatar === avatar);
         if (groupId) {
             await renameGroupChat(groupId, oldFileName, committedFileName);
-        } else if (characterId !== undefined && String(characterId) === String(this_chid) && characters[characterId]?.chat === oldFileName) {
-            characters[characterId].chat = committedFileName;
-            $('#selected_chat_pole').val(characters[characterId].chat);
-            await createOrEditCharacter();
+        } else if (characters[renamedCharacterId]?.chat === oldFileName) {
+            if (wasOpen) $('#selected_chat_pole').val(committedFileName);
+            await updateRemoteChatName(renamedCharacterId, committedFileName).catch(error => {
+                console.error('Chat renamed, but its current-chat record could not be saved:', error);
+                toastr.warning(error.message, t`Chat renamed, but the character's current chat could not be saved.`);
+            });
         }
 
-        if (currentChatId) {
-            await reloadCurrentChat();
+        if (wasOpen && isChatOpen({ avatar, groupId }, committedFileName)) {
+            await reloadCurrentChat().catch(error => {
+                console.error('Chat renamed, but it could not be reloaded:', error);
+                toastr.warning(error.message, t`Chat renamed, but the current chat could not be reloaded.`);
+            });
         }
 
         const eventData = { avatarId: body.avatar_url, groupId, oldFileName: body.original_file, newFileName: `${committedFileName}.jsonl` };
@@ -12722,8 +12504,7 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
         return committedFileName;
     } catch (error) {
         console.error('Failed to rename chat:', error);
-        await delay(500);
-        await callGenericPopup('An error has occurred. Chat was not renamed.', POPUP_TYPE.TEXT);
+        toastr.error(error.message, t`Chat could not be renamed.`);
         return undefined;
     } finally {
         await loaderHandle?.hide();
@@ -12762,7 +12543,7 @@ export async function closeCurrentChat() {
         this_edit_mes_id = undefined;
         chat_metadata = {};
         selected_button = 'characters';
-        $('#rm_button_selected_ch').children('h2').text('');
+        setSelectedCharacterName('');
         select_rm_characters();
         await eventSource.emit(event_types.CHAT_CHANGED, getCurrentChatId());
         return true;
@@ -12774,16 +12555,13 @@ export async function closeCurrentChat() {
 
 /**
  * Forces the update of the chat name for a remote character.
- * @param {string|number} characterId Character ID to update chat name for
+ * @param {string|number} characterId Character index, resolved before any await
  * @param {string} newName New name for the chat
- * @returns {Promise<boolean>} Whether the chat name was persisted
+ * @returns {Promise<void>}
  */
 export async function updateRemoteChatName(characterId, newName) {
     const character = characters[characterId];
-    if (!character) {
-        console.warn(`Character not found for ID: ${characterId}`);
-        return false;
-    }
+    if (!character) throw new Error(`Character not found: ${characterId}`);
     character.chat = newName;
     const mergeRequest = {
         avatar: character.avatar,
@@ -12795,17 +12573,14 @@ export async function updateRemoteChatName(characterId, newName) {
         body: JSON.stringify(mergeRequest),
     });
     if (!mergeResponse.ok) {
-        console.error('Failed to update character chat name', mergeResponse.statusText);
-        return false;
+        throw new Error(`Could not save the current chat for "${character.name}": ${mergeResponse.status} ${mergeResponse.statusText}`);
     }
-
-    return true;
 }
 
 
 function doCharListDisplaySwitch() {
     power_user.charListGrid = !power_user.charListGrid;
-    document.body.classList.toggle('charListGrid', power_user.charListGrid);
+    loadCharListState();
     saveSettingsDebounced();
 }
 
@@ -12828,7 +12603,7 @@ export async function handleDeleteCharacter(this_chid, delete_chats) {
 }
 
 /**
- * Deletes a character completely, including associated chats if specified
+ * Deletes characters and their unreferenced primary lorebooks, including chats if specified.
  *
  * @param {string|string[]} characterKey - The key (avatar) of the character to be deleted
  * @param {Object} [options] - Optional parameters for the deletion
@@ -12856,7 +12631,8 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
         return false;
     }
 
-    let deleted = false;
+    const deletedAvatars = new Set();
+    const candidateLorebooks = new Set();
 
     for (const key of characterKey) {
         const character = characters.find(x => x.avatar == key);
@@ -12864,6 +12640,7 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
             toastr.warning(t`Character ${key} not found. Skipping deletion.`);
             continue;
         }
+        const world = character.data?.extensions?.world;
 
         const chid = characters.indexOf(character);
         const pastChats = deleteChats
@@ -12886,6 +12663,9 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
             toastr.error(`${response.status} ${response.statusText}`, t`Failed to delete character`);
             continue;
         }
+        deletedAvatars.add(character.avatar);
+        // Only strings identify lorebooks; card extensions preserve other JSON types.
+        if (typeof world === 'string' && world) candidateLorebooks.add(world);
 
         try {
             const { clearCharacterSkillImportReminders } = await import('./scripts/tauri/agent-skills/reminders.js');
@@ -12907,7 +12687,23 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
         }
 
         await eventSource.emit(event_types.CHARACTER_DELETED, { id: chid, character: character });
-        deleted = true;
+    }
+
+    // Decide from the loaded list before a refresh can replace it, including after partial failure.
+    const remainingCharacterFiles = new Set();
+    for (const character of characters) {
+        if (deletedAvatars.has(character.avatar)) continue;
+        candidateLorebooks.delete(character.data?.extensions?.world);
+        remainingCharacterFiles.add(getCharaFilename(null, { manualAvatarKey: character.avatar }));
+    }
+    for (const lore of world_info.charLore ?? []) {
+        if (!remainingCharacterFiles.has(lore.name)) continue;
+        for (const world of lore.extraBooks ?? []) candidateLorebooks.delete(world);
+    }
+    for (const world of selected_world_info) candidateLorebooks.delete(world);
+    candidateLorebooks.delete(power_user.persona_description_lorebook);
+    for (const persona of Object.values(power_user.persona_descriptions)) {
+        candidateLorebooks.delete(persona.lorebook);
     }
 
     try {
@@ -12916,15 +12712,18 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
         console.error('Character deleted, but the UI refresh failed:', error);
         toastr.warning(t`Character deleted, but the character list could not be refreshed.`);
     }
-    if (deleted) {
+    for (const world of candidateLorebooks) {
         try {
-            await updateWorldInfoList();
+            if (await deleteWorldInfo(world, { saveLinkedCharacter: false })) {
+                toastr.success(t`Also deleted lorebook "${world}"`);
+            }
         } catch (error) {
-            console.error('Character deleted, but the World/Lorebook list refresh failed:', error);
+            console.error('Character deleted, but its lorebook cleanup could not be completed:', error);
+            toastr.warning(error?.message, t`Character deleted; lorebook cleanup failed`);
         }
     }
 
-    return deleted;
+    return deletedAvatars.size > 0;
 }
 
 /**
@@ -12937,9 +12736,9 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
 async function removeCharacterFromUI() {
     preserveNeutralChat();
     await clearChat();
-    $('#character_cross').trigger('click');
+    setCharacterPopupOpen(false);
     resetChatState();
-    $(document.getElementById('rm_button_selected_ch')).children('h2').text('');
+    setSelectedCharacterName('');
     restoreNeutralChat();
     await getCharacters();
     await printMessages();
@@ -13089,6 +12888,16 @@ API Settings: ${JSON.stringify(getSettingsContents[getSettingsContents.main_api 
     });
 }
 
+export function setCharacterPopupOpen(open) {
+    const panel = document.getElementById('character_popup');
+    const hadFocus = panel.contains(document.activeElement);
+    if (open) characterPopupOpener = document.activeElement;
+    $(panel).toggleClass('open', open).css('display', open ? 'flex' : 'none');
+    $('#advanced_div').attr('aria-expanded', String(open));
+    if (open) document.getElementById('character_popup_text').focus();
+    else if (hadFocus) characterPopupOpener?.focus();
+}
+
 function initCharacterSearch() {
     const debouncedCharacterSearch = debounce((searchQuery) => {
         entitiesFilter.setFilterData(FILTER_TYPES.SEARCH, searchQuery);
@@ -13105,10 +12914,14 @@ function initCharacterSearch() {
         debouncedCharacterSearch(searchQuery);
     });
 
+    function showSearchForm(show) {
+        searchForm.toggle(show);
+        searchButton.toggleClass('active', show).attr('aria-expanded', String(show));
+    }
+
     searchButton.on('click', function () {
         const newVisibility = !searchForm.is(':visible');
-        searchForm.toggle(newVisibility);
-        searchButton.toggleClass('active', newVisibility);
+        showSearchForm(newVisibility);
         accountStorage.setItem(storageKey, String(newVisibility));
         if (newVisibility) {
             searchInput.trigger('focus');
@@ -13117,8 +12930,7 @@ function initCharacterSearch() {
 
     eventSource.on(event_types.APP_READY, () => {
         const isVisible = accountStorage.getItem(storageKey) === 'true';
-        searchForm.toggle(isVisible);
-        searchButton.toggleClass('active', isVisible);
+        showSearchForm(isVisible);
     });
 }
 
@@ -13260,93 +13072,30 @@ jQuery(async function () {
         syncMountedDeleteState(chatSurface.getMountedMessageIds());
     });
 
-    /**
-     * Handles the deletion of a chat file, including group chats.
-     *
-     * @param {string} chatFile - The name of the chat file to delete.
-     * @param {object} group - The group object if the chat is part of a group.
-     * @param {boolean} [fromSlashCommand=false] - Whether the deletion was triggered from a slash command.
-     * @returns {Promise<void>}
-     */
-    async function handleDeleteChat(chatFile, group, fromSlashCommand = false) {
-        // Close past chat popup.
-        $('#select_chat_cross').trigger('click');
+    $(document).on('click', '.PastChat_cross', async function (event) {
+        event.stopPropagation();
+        const { avatar, group: groupId, file: fileName } = this.closest('.select_chat_block_wrapper').dataset;
+        if (!await confirmChatDelete(fileName)) return;
 
-        const loaderHandle = loader.show({
-            slug: 'chat-delete',
-            title: t`Delete Chat`,
-            message: t`Deleting chat…`,
-            toastMode: loader.ToastMode.STATIC,
+        const progress = loader.show({
+            slug: 'chat-delete', title: t`Delete Chat`,
+            message: t`Deleting chat…`, toastMode: loader.ToastMode.STATIC,
         });
-
         try {
-            if (group) {
-                await deleteGroupChat(group, chatFile);
-            } else {
-                await delChat(`${chatFile}.jsonl`);
-            }
+            if (groupId) await deleteGroupChat(groupId, fileName);
+            else await deleteCharacterChat(avatar, fileName);
         } catch (error) {
-            loaderHandle.hide();
-            throw error;
-        }
-
-        if (fromSlashCommand) {  // When called from `/delchat` command, don't re-open the history view.
-            closeOptionsMenu();
-            await loaderHandle.hide();
-        } else {  // Open the history view again after 2 seconds (delay to avoid edge cases for deleting last chat).
-            setTimeout(async function () {
-                $('#option_select_chat').trigger('click');
-                await loaderHandle.hide();
-            }, 2000);
-        }
-    }
-
-    $(document).on('click', '.PastChat_cross', async function (e, { fromSlashCommand = false } = {}) {
-        e.stopPropagation();
-        const deleteFileName = $(this).attr('file_name');
-        console.debug('detected cross click for' + deleteFileName);
-
-        // Skip confirmation if called from a slash command.
-        if (fromSlashCommand) {
-            await handleDeleteChat(deleteFileName, selected_group, true);
+            console.error('Could not delete chat:', error);
+            toastr.error(error.message, t`Chat could not be deleted.`);
             return;
+        } finally {
+            await progress.hide();
         }
-
-        const result = await callGenericPopup('<h3>' + t`Delete the Chat File?` + '</h3>', POPUP_TYPE.CONFIRM);
-        if (result === POPUP_RESULT.AFFIRMATIVE) {
-            await handleDeleteChat(deleteFileName, selected_group, false);
-        }
+        await displayPastChats();
     });
 
-    $('#advanced_div').on('click', function () {
-        if (!is_advanced_char_open) {
-            is_advanced_char_open = true;
-            $('#character_popup').css({ 'display': 'flex', 'opacity': 0.0 }).addClass('open');
-            $('#character_popup').transition({
-                opacity: 1.0,
-                duration: animation_duration,
-                easing: animation_easing,
-            });
-        } else {
-            is_advanced_char_open = false;
-            $('#character_popup').css('display', 'none').removeClass('open');
-        }
-    });
-
-    $('#character_cross').on('click', function () {
-        is_advanced_char_open = false;
-        $('#character_popup').transition({
-            opacity: 0,
-            duration: animation_duration,
-            easing: animation_easing,
-        });
-        setTimeout(function () { $('#character_popup').css('display', 'none'); }, animation_duration);
-    });
-
-    $('#character_popup_ok').on('click', function () {
-        is_advanced_char_open = false;
-        $('#character_popup').css('display', 'none');
-    });
+    $('#advanced_div').on('click', () => setCharacterPopupOpen(!$('#character_popup').hasClass('open')));
+    $('#character_cross, #character_popup_ok').on('click', () => setCharacterPopupOpen(false));
 
     $('#dialogue_popup_ok').on('click', async function (_e) {
         dialogueCloseStop = false;
@@ -13423,6 +13172,7 @@ jQuery(async function () {
     //////// OPTIMIZED ALL CHAR CREATION/EDITING TEXTAREA LISTENERS ///////////////
 
     $('#character_name_pole').on('input', function () {
+        $(this).removeAttr('aria-invalid');
         if (menu_type == 'create') {
             create_save.name = String($('#character_name_pole').val());
         }
@@ -13473,67 +13223,55 @@ jQuery(async function () {
 
     $(document).on('click', '.renameChatButton', async function (e) {
         e.stopPropagation();
-        const oldFileName = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
+        const { avatar, group: groupId, file: oldFileName } = this.closest('.select_chat_block_wrapper').dataset;
 
-        const popupText = await renderTemplateAsync('chatRename');
-        const newName = await callGenericPopup(popupText, POPUP_TYPE.INPUT, oldFileName);
-
-        if (!newName || typeof newName !== 'string' || newName == oldFileName) {
-            console.log('no new name found, aborting');
-            return;
+        const newName = await promptChatRename(oldFileName);
+        if (!newName) return;
+        const characterId = characters.findIndex(character => character.avatar === avatar);
+        if (await renameGroupOrCharacterChat({ characterId, groupId, oldFileName, newFileName: newName, loader: true })) {
+            await displayPastChats();
         }
-
-        await renameChat(oldFileName, newName);
-
-        await delay(250);
-        $('#option_select_chat').trigger('click');
     });
 
     $(document).on('click', '.exportChatButton, .exportRawChatButton', async function (e) {
         e.stopPropagation();
+        const { avatar, group: groupId, file: fileName } = this.closest('.select_chat_block_wrapper').dataset;
         const format = $(this).data('format') || 'txt';
-        await saveChatConditional();
-        const filename = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
-        console.log(`exporting ${filename} in ${format} format`);
-
         const body = {
-            is_group: !!selected_group,
-            avatar_url: characters[this_chid]?.avatar,
-            file: `${filename}.jsonl`,
-            exportfilename: `${filename}.${format}`,
+            is_group: !!groupId,
+            avatar_url: avatar,
+            file: `${fileName}.jsonl`,
+            exportfilename: `${fileName}.${format}`,
             format: format,
         };
-        console.log(body);
         try {
+            if (isChatOpen({ avatar, groupId }, fileName)) await saveChatConditional();
             const response = await fetch('/api/chats/export', {
                 method: 'POST',
                 body: JSON.stringify(body),
                 headers: getRequestHeaders(),
             });
             const data = await response.json();
-            if (!response.ok) {
-                // display error message
-                console.log(data.message);
-                await delay(250);
-                toastr.error(`Error: ${data.message}`);
-                return;
-            } else {
-                const mimeType = format == 'txt' ? 'text/plain' : 'application/octet-stream';
-                // success, handle response data
-                console.log(data);
-                await delay(250);
-                download(data.result, body.exportfilename, mimeType);
-            }
+            if (!response.ok) throw new Error(data.message);
+            const mimeType = format == 'txt' ? 'text/plain' : 'application/octet-stream';
+            download(data.result, body.exportfilename, mimeType);
         } catch (error) {
-            // display error message
-            console.log(`An error has occurred: ${error.message}`);
-            await delay(250);
-            toastr.error(`Error: ${error.message}`);
+            console.error('Chat could not be exported:', error);
+            toastr.error(error.message, t`Chat could not be exported.`);
         }
     });
 
 
-    const closeOptionsMenu = initPopupMenu(document.getElementById('options_button'), document.getElementById('options'), {
+    async function startNewChat(deleteCurrentChat) {
+        try {
+            await doNewChat({ deleteCurrentChat });
+        } catch (error) {
+            console.error('New chat operation failed:', error);
+            toastr.error(error.message, t`Chat could not be created.`);
+        }
+    }
+
+    const { close: closeOptionsMenu } = initPopupMenu(document.getElementById('options_button'), document.getElementById('options'), {
         onOpen() {
             showBookmarksButtons();
             optionsPopper.update();
@@ -13561,19 +13299,7 @@ jQuery(async function () {
                 await openPermanentAssistantCard();
             }
             if ((selected_group && !is_group_generating) || (this_chid !== undefined && !is_send_press) || fromSlashCommand) {
-                await displayPastChats();
-                //this is just to avoid the shadow for past chat view when using /delchat
-                //however, the dialog popup still gets one..
-                if (!fromSlashCommand) {
-                    console.log('displaying shadow');
-                    $('#shadow_select_chat_popup').css('display', 'block');
-                    $('#shadow_select_chat_popup').css('opacity', 0.0);
-                    $('#shadow_select_chat_popup').transition({
-                        opacity: 1.0,
-                        duration: animation_duration,
-                        easing: animation_easing,
-                    });
-                }
+                await setChatHistoryOpen(true);
             }
         } else if (id == 'option_start_new_chat') {
             if ((selected_group || this_chid !== undefined) && !is_send_press) {
@@ -13585,7 +13311,7 @@ jQuery(async function () {
                     return;
                 }
 
-                await doNewChat({ deleteCurrentChat: deleteCurrentChat });
+                await startNewChat(deleteCurrentChat);
             }
             if (!selected_group && this_chid === undefined && !is_send_press) {
                 const alreadyInTempChat = this_chid === undefined && name2 === neutralCharacterName;
@@ -13664,8 +13390,8 @@ jQuery(async function () {
     });
 
     $('#newChatFromManageScreenButton').on('click', async function () {
-        await doNewChat({ deleteCurrentChat: false });
-        $('#select_chat_cross').trigger('click');
+        setChatHistoryOpen(false);
+        await startNewChat(false);
     });
 
     //////////////////////////////////////////////////////////////////////////////////////////////
@@ -13774,14 +13500,7 @@ jQuery(async function () {
 
     //////////////////////////////////////////////////////////////
 
-    $('#select_chat_cross').on('click', function () {
-        $('#shadow_select_chat_popup').transition({
-            opacity: 0,
-            duration: animation_duration,
-            easing: animation_easing,
-        });
-        setTimeout(function () { $('#shadow_select_chat_popup').css('display', 'none'); }, animation_duration);
-    });
+    $('#select_chat_cross').on('click', () => setChatHistoryOpen(false));
 
     $(document).on('click', '.mes_copy', async function () {
         if (this_chid !== undefined || selected_group || name2 === neutralCharacterName) {
@@ -13940,31 +13659,17 @@ jQuery(async function () {
             return;
         }
 
-        const avatarFileNames = [];
-        pauseImportedCharacterAgentAssetQueue();
         try {
-            for (const file of e.target.files) {
-                const imported = await importCharacter(file);
-                if (imported) {
-                    avatarFileNames.push(imported.avatarFileName);
-                }
-            }
-
-            if (avatarFileNames.length > 0) {
-                await importCharactersTags(avatarFileNames);
-                selectImportedChar(avatarFileNames[avatarFileNames.length - 1]);
-            }
+            await processDroppedFiles(Array.from(e.target.files));
         } finally {
-            resumeImportedCharacterAgentAssetQueue();
-            // Clear the file input value to allow re-uploading the same file
+            // Allow selecting the same file again.
             e.target.value = '';
         }
     });
 
-    $('#export_button').on('click', function () {
-        isExportPopupOpen = !isExportPopupOpen;
-        $('#export_format_popup').toggle(isExportPopupOpen);
-        exportPopper.update();
+    initPopupMenu(document.getElementById('export_button'), document.getElementById('export_format_popup'), {
+        onOpen: () => { exportPopper.update(); },
+        closesOnClick: target => Boolean(target.closest('.export_format')),
     });
 
     $(document).on('click', '.export_format', async function () {
@@ -13974,9 +13679,6 @@ jQuery(async function () {
             return;
         }
 
-        $('#export_format_popup').hide();
-        isExportPopupOpen = false;
-        exportPopper.update();
 
         try {
             const selectedCharacter = characters[this_chid];
@@ -14123,14 +13825,6 @@ jQuery(async function () {
 
     $('html').on('touchstart mousedown', async function (e) {
         const clickTarget = $(e.target);
-
-        if (isExportPopupOpen
-            && clickTarget.closest('#export_button').length == 0
-            && clickTarget.closest('#export_format_popup').length == 0) {
-            $('#export_format_popup').hide();
-            isExportPopupOpen = false;
-            exportPopper.update();
-        }
 
         const forbiddenTargets = [
             '#character_cross',
@@ -14342,7 +14036,6 @@ jQuery(async function () {
                 break;
             case 'import_character_info':
                 await importEmbeddedWorldInfo();
-                saveCharacterDebounced();
                 break;
             case 'character_source': {
                 const source = getCharacterSource(this_chid);
@@ -14538,8 +14231,11 @@ jQuery(async function () {
         doCharListDisplaySwitch();
     });
 
-    $('#hideCharPanelAvatarButton').on('click', () => {
-        $('#avatar-and-name-block').slideToggle();
+    $('#hideCharPanelAvatarButton').on('click', function () {
+        const panel = $('#avatar-and-name-block').stop(true, true);
+        const open = panel.css('display') === 'none';
+        panel.slideToggle();
+        $(this).attr('aria-expanded', String(open));
     });
 
     $(document).on('click', '#show_more_messages', async function (event) {

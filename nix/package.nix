@@ -24,7 +24,7 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "tauritavern";
-  version = "2.3.0";
+  version = "2.4.0";
 
   inherit src;
 
@@ -42,7 +42,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ;
     pnpm = pnpm_11;
     fetcherVersion = 3;
-    hash = "sha256-NmZosAYmiA1cTx8xhauayPEdrvQvvfUNt3IEmeEcZtE=";
+    hash = "sha256-yJu2mv0n+yifdaYjDk8GKhNPDzfgECZiKwI9VMGHIbw=";
   };
 
   nativeBuildInputs = [

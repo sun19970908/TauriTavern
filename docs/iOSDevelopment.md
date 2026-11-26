@@ -1,6 +1,6 @@
 # TauriTavern iOS 端开发说明
 
-本文档记录当前 iOS 端开发中已经踩过的关键问题、根因分析、已落地方案，以及对应的架构改动。目标是避免重复踩坑，并确保移动端样式契约（`--tt-inset-*`）在 iOS 上可预测、可维护。
+本文档记录 iOS 端已经踩过的关键问题、根因与已落地方案。
 
 补充：iOS/iPadOS 的 **分发 Policy（profile + capabilities snapshot）** 属于“合规裁剪/能力分级”问题域，其当前实现快照与维护约束已收敛到 `docs/CurrentState/iOSPolicy.md`，本文件仍聚焦 WKWebView 行为差异与 iOS-only 桥接。
 
@@ -8,59 +8,32 @@
 
 | iOS/iPadOS | `structuredClone` | Element Fullscreen | 支持级别 |
 | --- | --- | --- | --- |
-| 15.0–15.3 | 上游 vendored polyfill | 关闭 | 有限支持 |
-| 15.4–15.x | WebKit 原生实现 | 关闭 | 有限支持 |
+| 15.0–15.3 | 上游 vendored polyfill | 开启 | 有限支持 |
+| 15.4–15.x | WebKit 原生实现 | 开启 | 有限支持 |
 | 16.0–16.3 | WebKit 原生实现 | 开启 | 有限支持 |
 | 16.4+ | WebKit 原生实现 | 开启 | 完整支持 |
 
 `src/index.html` 已在 `init.js` 前加载 SillyTavern 1.18.0 的 `lib/structured-clone/monkey-patch.js`。它只在全局能力缺失时安装，15.4+ 不替换 WebKit 原生函数。
 
-## 1. WKWebView safe-area 自动 inset 导致底部死区
+## 1. WKWebView 内容视口
 
-### 1.1 现象
+`infrastructure/ios_webview.rs::configure_main_wkwebview()` 在主窗口 build 后安装 `platform/ios_window_layout.rs` 的窗口宿主。WKWebView 的上、左、右约束到 safeAreaLayoutGuide，底边约束到 keyboardLayoutGuide.topAnchor；内部 UIScrollView 保持 `.never` 与零 inset，避免同一份遮挡再扣一次。iOS 没有沉浸模式。职责与背景链路见 [CurrentState/MobileStyleAdaptation.md](CurrentState/MobileStyleAdaptation.md)。
 
-- 页面底部出现一块灰色、不可交互的区域。
-- 前端根节点（如 `#sheld`）看似已撑满 `window.innerHeight`，但依然无法覆盖到屏幕底边。
+排查灰带或双重缩小时，对照 WKWebView frame、`innerHeight`/`visualViewport` 与键盘边界：窗口与内容视口的差值应恰好等于安全区与停靠键盘。
 
-### 1.2 关键定位信号
+附属栏移除、下滑收键盘手势与拖动期间的高度保持见同一文档的 iOS 一节。排查收键盘卡顿时数 `innerHeight` 的变化次数：一次下滑收起只应有 1 次 resize；逐帧变化说明 WebView 高度在跟随 guide，WebKit 会逐帧整文档重建样式（`WebPage::viewportConfigurationChanged → updateSizeForCSSDefaultViewportUnits → Style::Scope::didChangeStyleSheetEnvironment`）。
 
-当出现如下特征时，优先判断为 **iOS native 侧对 WebView 做了 safe-area 自动 inset 调整**，而不是纯前端 CSS 高度问题：
+### 1.1 UIScene 生命周期
 
-- `screen.height - window.innerHeight` 显著大于 0（例如 `96px`）
-- 同时 `env(safe-area-inset-bottom)`（或 `--tt-inset-bottom`）仍为非 0（例如 `34px`）
+iOS 27 SDK 要求 UIScene 生命周期。Tao 只要看到 `UIApplicationSceneManifest` 就启用它，与多窗口无关。`gen/apple/project.yml` 与已提交的 `Info.plist` 保留 manifest 并声明 `UIApplicationSupportsMultipleScenes = false`，应用只有一个主窗口；Tao 动态返回带 `TaoSceneDelegate` 的配置，宿主不监听 `SceneRequested`，也不声明 `UISceneConfigurations`。
 
-这通常意味着：**Web 内容的 viewport 被系统按 safe-area 扣掉了（顶部 + 底部）**，因此 DOM 只能布局在“安全区内的可视内容区域”，无法触达屏幕真实底边。
+scene 生命周期相关的改动以 release 构建真机冷启动验收：#337 的崩溃只在 release 构建出现。
 
-### 1.3 根因
+### 1.2 Xcode 27 构建
 
-WKWebView 内部是 `UIScrollView` 承载 Web 内容；在默认行为下，iOS 可能对该 scroll view 启用自动的内容 inset 调整（safe-area / scroll indicator insets），导致：
+Xcode 27 的优化构建会把非 `public` 的 `@_cdecl` 函数降为本地符号，Rust 因此链接不到 Swift 入口。swift-rs 1.0.9、Tauri 2.12.3 与当前锁定的官方插件已把这些入口声明为 `public`；引入新的带 Swift 包的插件时，确认它的 `init_plugin_*` 也是 `public`。
 
-- Web 内容 viewport 变小（`window.innerHeight` 被扣减）
-- 产生“看得见但不可交互”的底部空白区域（它不是 DOM 的一部分）
-
-这会与当前的移动端布局契约冲突：iOS 侧 safe-area 应由前端通过 `env(safe-area-inset-*)` → `--tt-inset-*` 统一消费，而不是由 native 再额外“帮你扣一遍”。
-
-### 1.4 已落地方案（fail-fast）
-
-在 iOS 端创建主窗口后，对 WKWebView 的 `scrollView` 做一次性配置：
-
-- `scrollView.contentInsetAdjustmentBehavior = .never`
-- 清空 `contentInset` 与 `scrollIndicatorInsets`
-- 关闭 `automaticallyAdjustsScrollIndicatorInsets`
-
-该策略的目标是：让 `window.innerHeight` 覆盖到 full-bleed viewport；safe-area 的避让完全交给 CSS contract（`--tt-inset-*`）控制。
-
-实现位置：
-
-- iOS 配置入口：`src-tauri/crates/tauritavern/src/infrastructure/ios_webview.rs` 的 `configure_main_wkwebview()`
-- 调用时机：`src-tauri/crates/tauritavern/src/app/host/window.rs`（主窗口 build 后立刻调用）
-
-### 1.5 验收建议
-
-修复后应满足：
-
-- `screen.height - window.innerHeight` 接近 0（允许 1px 内的 rounding）
-- `--tt-inset-bottom` 仍保持合理的 safe-area 值（如 `34px`），且输入框/按钮不被 home indicator 遮挡
+`swift-rs` 按所在 crate 的调试设置选择 Swift 优化级别。Tauri 与带 Swift 包的插件必须以同一模式构建：dev profile 对所有依赖关闭调试信息，不为其中个别 crate 单独开启。模式不一致时，真机在 `registerPlugin` 以 `swift_deletedMethodError` 中止，模拟器不会暴露。
 
 ## 2. 文件导入与导出
 
@@ -82,31 +55,12 @@ UIKit 界面在主线程上展示；在 iPad 上，popover 必须指定 sourceVi
 - `src-tauri/crates/tt-adapter-archive/src/data_archive/import/layout.rs`
 - `src-tauri/crates/tt-adapter-archive/src/data_archive/import/extract.rs`
 
-## 4. WKWebView Element Fullscreen（iOS 16+ 启用）
+## 4. WKWebView Element Fullscreen
 
-### 4.1 现象
+- Element fullscreen 由 Wry 默认开启（iOS 15.4+ 用公开的 `WKPreferences.elementFullscreenEnabled`，更早的系统用 KVC）；宿主不配置，也不按版本关闭。支持级别见文首表格。
+- 角色卡、JS-Slash-Runner、同源 iframe 使用标准浏览器 Fullscreen API，不增加 JS-native bridge。退出全屏后视图重挂载，由 `KeyboardScrollView` 恢复约束。
 
-- 角色卡或扩展内的同源 iframe 页面在桌面/Android 可进入全屏，但 iOS 上 `requestFullscreen()` / `webkitRequestFullscreen()` 不生效。
-
-### 4.2 根因
-
-- 问题不在前端按钮或 JS-Slash-Runner 事件语义，而在宿主 WKWebView 默认没有开启 element fullscreen 能力。
-- TauriTavern 的兼容目标仍然是让上游页面继续使用标准浏览器 Fullscreen API，而不是引入额外 JS-native bridge。
-
-### 4.3 已落地方案
-
-- 继续复用 `src-tauri/crates/tauritavern/src/infrastructure/ios_webview.rs` 的主 WebView 配置入口，在 `configure_main_wkwebview()` 内统一完成两类 native 配置：
-  - 关闭 `scrollView` 的 safe-area 自动 inset 调整；
-  - 仅在 iOS 16.0+ 开启 `WKPreferences.setElementFullscreenEnabled(true)`。
-- 这样角色卡、JS-Slash-Runner、同源 iframe 的 fullscreen 事件、退出语义和上游契约保持一致，宿主只补齐平台能力，不改前端行为。
-
-### 4.4 支持边界
-
-- 公开 `WKPreferences.elementFullscreenEnabled` 从 iOS 15.4 可用且默认关闭；TauriTavern 仍将 iOS 16.0 作为产品 fullscreen feature floor。
-- iOS 15 保持 WebKit 默认关闭，不删除 iframe 权限、不改写 `requestFullscreen()`，让页面继续观察标准浏览器失败语义。
-- iOS 16.0–16.3 可使用 fullscreen，但仍属于有限支持；完整支持从 iOS 16.4 开始。
-
-### 4.5 构建版本契约
+### 4.1 构建版本契约
 
 - 最低部署版本是 `15.0`，规范值写在 `tauri.conf.json` 的 `bundle.iOS.minimumSystemVersion`。
 - `gen/apple/project.yml`、`Podfile` 与已提交 `.xcodeproj` 必须保持同值；Xcode pre-build script 会将真实 `IPHONEOS_DEPLOYMENT_TARGET` 与 Tauri 配置比较，不一致时直接失败。
@@ -119,7 +73,7 @@ iOS 外测/内测分发裁剪与能力分级已落地为 iOS-only 的 `ios_polic
 
 - 当前实现快照：`docs/CurrentState/iOSPolicy.md`
 
-## 6. iOS 18+ App Icon 外观变体
+## 6. App Icon 外观变体（iOS 18+ / macOS 26+）
 
 ### 6.1 现象
 
@@ -166,6 +120,21 @@ xcrun assetutil --info /tmp/tt-appicon/Assets.car
 
 输出应包含 `UIAppearanceDark` 与 `ISAppearanceTintable`。若未来重新运行 `tauri icon`，必须重新生成并保留这三个 appearance 变体。
 
+### 6.4 macOS 26+
+
+macOS 26 会把不规则形状的 `.icns` 缩小放进灰色底板。`src-tauri/crates/tauritavern/icons/AppIcon.icon` 是 Icon Composer 文档：底色与 iOS `Any` 相同，logo 为单一图层，深色、着色与透明外观由系统生成。Tauri 打包时用 `actool`（Xcode 26+）把它编译为 `Assets.car` 并写入 `CFBundleIconName`；`icon.icns` 仍作为 `CFBundleIconFile` 供 macOS 15 及更早版本使用。
+
+Tauri npm CLI 当前会让 `actool` 继承已关闭的 stdin，导致图标编译失败（[上游问题 #15315](https://github.com/tauri-apps/tauri/issues/15315)）。统一入口 `scripts/tauri-app.mjs` 在 macOS 上把 `scripts/macos` 加到子进程 PATH 前端，`actool` 入口用 `xcrun actool "$@" </dev/null` 显式提供空 stdin。升级到包含 [#15991](https://github.com/tauri-apps/tauri/pull/15991) 修复的 CLI 后，删除这个入口和 PATH 设置。
+
+更换 logo 时，用 Icon Composer 打开该文档替换 `Assets/logo.png`（1024px 透明 PNG）。预览各外观：
+
+```sh
+"$(xcode-select -p)/../Applications/Icon Composer.app/Contents/Executables/ictool" \
+  src-tauri/crates/tauritavern/icons/AppIcon.icon \
+  --export-image --output-file /tmp/tt-macos-icon.png \
+  --platform macOS --rendition Dark --width 512 --height 512 --scale 1
+```
+
 ## 7. AI 生成后台执行
 
 iOS Chat Completion 的后台租约由 Rust `ChatCompletionService` 持有，不依赖 WKWebView 的 Promise、Channel 或定时器继续运行：
@@ -190,3 +159,7 @@ iOS Chat Completion 的后台租约由 Rust `ChatCompletionService` 持有，不
 LAN 发现通过系统 Bonjour 浏览和注册 `_tauritavern._tcp`。Info.plist 声明 `NSLocalNetworkUsageDescription` 与 `NSBonjourServices`，由用户授予本地网络访问权限；此路径不需要 Multicast Networking entitlement。macOS 使用相同的系统后端与用途声明。
 
 权限行为以真机签名包验证，后台发现受 iOS 生命周期限制。配置入口见 [Apple host 工程](../src-tauri/crates/tauritavern/gen/apple/project.yml)，功能边界见[同步总览](CurrentState/Sync.md)。
+
+## 9. Tauri Pilot
+
+`pnpm run ios:dev:pilot` 在模拟器中启动带 Pilot 的 debug 包。模拟器共享 Mac 的文件系统，插件的 socket 位于 `/tmp/tauri-pilot-com.tauritavern.client.sock`，CLI 直接发现，无需转发。桌面开发版与模拟器使用同一路径，先启动的占用，其余实例不启动 Pilot 服务。真机沙箱对 Mac 隐藏 socket，暂不支持；iOS 上没有 `press`，文字输入用 `fill` 或 `type`。

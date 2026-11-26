@@ -3,13 +3,13 @@
 import {
     loadAgentContextPolicy,
     normalizeAgentContextPolicy,
+    projectAgentPromptInputs,
 } from '../../../scripts/tauritavern/agent/agent-context-policy.js';
 import {
     loadResolvedAgentSystemPrompt,
     normalizeAgentSystemPrompt,
 } from '../../../scripts/tauritavern/agent/agent-system-prompt.js';
 import { createMacroContextFromSnapshot, normalizeFrozenRunInputSnapshot } from '../../../scripts/tauritavern/agent/frozen-run-input-snapshot.js';
-import { createAgentPromptSnapshot } from '../../../scripts/tauritavern/agent/agent-model-messages.js';
 import { setParamOmitted } from '../../../scripts/tauri/generation-params/omission.js';
 
 const PROMPT_ASSEMBLY_SOURCE = 'frontend-prompt-assembly-broker';
@@ -21,10 +21,11 @@ const PROMPT_ASSEMBLY_SOURCE = 'frontend-prompt-assembly-broker';
  * @param {Record<string, unknown>} input
  */
 export async function buildPromptAssemblySnapshot(input = {}) {
-    const { payload, snapshotMetadata, ...assembled } = await buildPromptAssemblyPayload(input);
+    const { payload, snapshotInputs, ...assembled } = await buildPromptAssemblyPayload(input);
+    const { createAgentPromptSnapshot } = await import('../../../scripts/openai.js');
     return {
         ...assembled,
-        promptSnapshot: createAgentPromptSnapshot(payload, snapshotMetadata),
+        promptSnapshot: createAgentPromptSnapshot(payload, snapshotInputs),
     };
 }
 
@@ -56,23 +57,23 @@ export async function buildPromptAssemblyPayload(input = {}) {
         macroContext: request.macroContext,
         jsonSchema: request.jsonSchema,
         agentMode: true,
-        agentContextPolicy: request.agentContextPolicy,
         agentSystemPrompt: request.agentSystemPrompt,
         agentTaskPrompt: request.agentTaskPrompt,
         contextKind: request.frozenRunInputSnapshot.contextKind ?? 'chat',
     });
 
     if (request.frozenRunInputSnapshot.contextKind === 'session') {
-        // JSONL owns the full history; the Run retains only the budgeted prompt messages.
-        delete request.frozenRunInputSnapshot.promptInputs.agentMessages;
+        // JSONL owns Session history; the frozen input retains the macro environment.
+        delete request.frozenRunInputSnapshot.promptInputs.sessionHistory;
     }
 
     const payload = result.chatCompletionPayload;
     return {
         payload,
-        snapshotMetadata: {
+        snapshotInputs: {
+            settings,
             contextPolicy: request.agentContextPolicy,
-            ...(request.worldInfoActivation ? { worldInfoActivation: request.worldInfoActivation } : {}),
+            worldInfoActivation: request.worldInfoActivation,
         },
         frozenRunInputSnapshot: request.frozenRunInputSnapshot,
         generationIntent: {
@@ -98,7 +99,7 @@ async function normalizePromptAssemblyRequest(input) {
     const profileId = normalizeOptionalString(input.profileId ?? input.profile_id);
     const frozenRunInputSnapshot = normalizeRequiredFrozenRunInputSnapshot(input);
     const generationType = normalizeGenerationType(
-        input.generationType ?? input.generation_type ?? frozenRunInputSnapshot?.generationType,
+        input.generationType ?? input.generation_type ?? frozenRunInputSnapshot.generationType,
     );
     if (frozenRunInputSnapshot.generationType !== generationType) {
         throw new Error('prompt_assembly.generation_type_mismatch: generationType must match FrozenRunInputSnapshot.generationType');
@@ -115,15 +116,16 @@ async function normalizePromptAssemblyRequest(input) {
     if (directMacroContext != null) {
         throw new Error('prompt_assembly.macro_context_duplicated: macroContext must be read from FrozenRunInputSnapshot');
     }
-    const promptInputs = requirePlainObject(
+    const capturedPromptInputs = requirePlainObject(
         frozenRunInputSnapshot.promptInputs,
         'prompt_assembly.prompt_inputs_required: promptInputs must be an object',
     );
-    const macroContext = createMacroContextFromSnapshot(frozenRunInputSnapshot);
     const settings = normalizeSettings(input);
     const agentContextPolicy = input.agentContextPolicy || input.contextPolicy
         ? normalizeAgentContextPolicy(input.agentContextPolicy ?? input.contextPolicy)
         : await loadAgentContextPolicy(profileId);
+    const promptInputs = projectAgentPromptInputs(capturedPromptInputs, agentContextPolicy);
+    const macroContext = createMacroContextFromSnapshot(frozenRunInputSnapshot, promptInputs);
     const agentSystemPrompt = Object.prototype.hasOwnProperty.call(input, 'agentSystemPrompt')
         ? normalizeAgentSystemPrompt(input.agentSystemPrompt)
         : Object.prototype.hasOwnProperty.call(input, 'agent_system_prompt')

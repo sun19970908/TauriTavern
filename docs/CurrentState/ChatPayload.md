@@ -51,7 +51,7 @@ transport 解析完整 JSONL 后直接把同一对象数组交给核心调用方
 
 扩展的兼容 get 共用仓储读取器，将 JSONL 按需转换为 JSON 数组字节，由消费者解析；接口与流式错误语义见 [FrontendHostContract §4.3](../FrontendHostContract.md#43-路由表public)。
 
-角色聊天在完整水合后才绑定本次 payload 请求的 character/chat 快照。若角色当前 stem 不存在、但已有聊天列表非空，则沿用 `replaceCurrentChat()` 的最近聊天语义按需修复并写回；列表为空时才允许创建新聊天。恢复只在打开目标角色时发生，不做启动期全库扫描。
+角色聊天在完整水合后才绑定本次 payload 请求的 character/chat 快照。若角色当前 stem 不存在、但已有聊天列表非空，则由 `resolvePersistedChat` 按最近聊天语义按需修复并写回；列表为空时才允许创建新聊天。恢复只在打开目标角色时发生，不做启动期全库扫描。
 
 显式打开指定聊天（首页 recent、聊天管理器、书签、分支）统一经由 `selectCharacterById(id, { chatFile })` 与 `openGroupById(id, { chatId })`：不预扫聊天列表、不恢复、不新建；角色 `chat` 与群组 `chat_id` 只在目标加载成功后写回。
 
@@ -93,6 +93,19 @@ storage-core 的 `chat_metadata.rs` 在路径 mutation lock 内读取最新 head
 
 JS 与 IPC 成本随提交的 metadata 大小增长；Rust 工作内存随 header 与新值增长，不随正文增长。磁盘仍需读写完整替代文件，成本为 Θ(文件大小)，文件 mtime 随之更新。header 不保证字段顺序或格式，正文保持原字节。
 
+### 3.2 删除与重命名
+
+删除或重命名打开中的聊天前先经 `prepareCurrentChatFileChange({ saveEdits })`：生成中拒绝；之后不再有写入落到该文件。重命名保留内容，先完整保存（`saveChatConditional()`），保存失败则中止；删除不需要内容，取消已排定的防抖保存并等待已排队的写入结束，未保存的编辑随文件一起删除。`doNewChat({ deleteCurrentChat: true })` 在清空前保存，与 HEAD 一致，使被删聊天的备份是最新的；新聊天建立后删除失败，报告“已创建，但……”。
+
+文件操作在开始时确定目标（头像或群组 id 加文件名），角色记录由 `updateRemoteChatName(characterId, name)` 写入。上游导出 `replaceCurrentChat`、`deleteCharacterChatByName`、`deleteGroupChatByName` 与界面共用同一套删除与替换实现。删除打开中的聊天后，按“清空 → 重置元数据 → 记录指向替代聊天 → 加载 → 保存记录”替换；改名后由 `renameGroupOrCharacterChat` 让仍指向旧名的记录跟随。文件操作成功后，后续步骤失败报告“已删除 / 已改名，但……”。导出只在目标是打开中的聊天时先保存。
+
+按名删除也会加载替代聊天。已确认的扩展边界（2026-10-09）：
+
+- Discordia 0.7.3 删除后再次清空宿主聊天的流程不支持；它可能清空并在后续保存时覆盖替代聊天。
+- Folder Manager 3.0.15 批量删除最后一条当前聊天后会自行新建，可能多留一份新聊天；此差异已接受。
+
+已知边界：当前聊天没有显式会话；准入不阻止之后新发起的保存，也不覆盖队列外的批量写入（`renamePastChats`、`renameGroupMember`）。
+
 ## 4. First-class Tool 消息
 
 Legacy Generate 的工具轮直接保存在同一扁平 `chat[]` 中：
@@ -106,7 +119,7 @@ Assistant 即使没有正文，只要包含 `tool_calls` 就是完整消息。�
 
 新 writer 固定写入 `is_user:false`、`is_system:true`，使只理解 SillyTavern legacy booleans 的扩展默认过滤 Tool；历史重放只以 `role === "tool"` 为角色事实，不因兼容 booleans 或展示用 `name`/`error` 被编辑而阻塞。Tool 是可见、可编辑、可独立删除的真实楼层，复用 legacy tool floor 的 `smallSysMes` 紧凑样式；展示层按 `tool_call_id` 向前读取最近的 Assistant call，并以旧 formatter 在同一个默认折叠的 `<details>` 中显示 Arguments 与 Result，不复制持久化数据。`chat[]` 物理顺序、DOM `mesid` 与 `.last_mes` 始终表达同一顺序，不再维护“物理尾 Tool / 逻辑尾 Assistant”两套语义。
 
-编辑、删除、移动、复制、隐藏与分支都只处理用户指定的物理消息，不做 owner/result 级联，也不阻止用户制造不完整工具轮。Assistant call 与 Tool result 的配对只在 provider prompt 组装边界执行；只有 provider 无法重放的 missing、orphan、duplicate、无效 ID/参数/结果关系才会带原始 `chat[index]` 明确失败。空 `tool_calls`/legacy invocation 数组视为没有工具事实，非协议必需的展示元数据不会阻断生成。
+编辑、删除、移动、复制、隐藏与分支都只处理用户指定的物理消息，不做 owner/result 级联，也不阻止用户制造不完整工具轮。Assistant call 与 Tool result 的配对只在 provider prompt 组装边界执行；只有 provider 无法重放的 missing、orphan、duplicate、无效 ID/参数/结果关系才会带原始 `chat[index]` 明确失败。空 `tool_calls`/legacy invocation 数组视为没有工具事实，非协议必需的展示元数据不会阻断生成。隐藏带工具调用的 Assistant 时，它的 Tool 结果也不进入提示词。
 
 SillyTavern 1.19.0 新增的工具级联删除及其参数不在 TT 支持范围内。
 

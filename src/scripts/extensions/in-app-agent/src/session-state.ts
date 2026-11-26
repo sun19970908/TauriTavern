@@ -2,6 +2,8 @@ export type AssistantRun = {
     runId: string;
     active: boolean;
     status: TauriTavernAgentRunStatus | 'interrupted';
+    /** Known when the run was observed through a Session run handle. */
+    createdAt?: string;
 };
 
 export function terminalStatus(event: TauriTavernAgentRunEvent): TauriTavernAgentRunStatus | null {
@@ -31,6 +33,29 @@ export function appendedMessageSeq(event: TauriTavernAgentRunEvent): number {
         throw new Error('in-app-agent: session_message_appended has no valid seq');
     }
     return payload.seq;
+}
+
+export type ContextUsage = { tokens: number; point: number };
+
+function measurement(event: TauriTavernAgentRunEvent): unknown {
+    const payload = typeof event.payload === 'object' && event.payload !== null ? event.payload as Record<string, unknown> : {};
+    if (event.type === 'model_request_created') return payload.context;
+    if (event.type === 'context_compacted' && payload.point !== undefined) return { tokens: payload.tokensAfter, point: payload.point };
+    return undefined;
+}
+
+// The count is the runtime's own, the one it compares with the compaction point. Older journals carry none.
+export function contextUsage(events: TauriTavernAgentRunEvent[]): ContextUsage | null {
+    for (let index = events.length - 1; index >= 0; index--) {
+        const value = measurement(events[index]!);
+        if (value === undefined) continue;
+        const { tokens, point } = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>;
+        if (!Number.isSafeInteger(tokens) || !Number.isSafeInteger(point) || (tokens as number) < 0 || (point as number) < 1) {
+            throw new Error('in-app-agent: the context measurement is invalid');
+        }
+        return { tokens: tokens as number, point: point as number };
+    }
+    return null;
 }
 
 export function mergeMessages(
