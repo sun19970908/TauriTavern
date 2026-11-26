@@ -108,6 +108,35 @@ export function toRequest(url, input, init) {
     return new Request(isRequestLike(input) ? input : url, init);
 }
 
+function isFormUrlEncodedRequest(input, init) {
+    const source = init?.headers ?? (isRequestLike(input) ? input.headers : null);
+    if (!source) {
+        return false;
+    }
+    try {
+        const contentType = new Headers(source).get('content-type') || '';
+        return contentType.trim().toLowerCase().startsWith('application/x-www-form-urlencoded');
+    } catch {
+        return false;
+    }
+}
+
+function parseJsonOrFormBody(rawBody, input, init) {
+    const text = String(rawBody || '').trim();
+    if (!text) {
+        return {};
+    }
+
+    try {
+        return JSON.parse(text);
+    } catch {
+        if (isFormUrlEncodedRequest(input, init)) {
+            return Object.fromEntries(new URLSearchParams(rawBody).entries());
+        }
+        return text;
+    }
+}
+
 /**
  * Reads a routed request body as its route declares: `json` parses it like Express's JSON and urlencoded
  * parsers, `text` keeps the text, and `none` leaves the request to the route.
@@ -135,7 +164,7 @@ export async function readRequestBody(input, init, mode = 'json') {
     }
 
     if (typeof rawBody === 'string') {
-        return decode(rawBody);
+        return mode === 'text' ? rawBody : parseJsonOrFormBody(rawBody, input, init);
     }
 
     if (isUrlSearchParamsLike(rawBody)) {
