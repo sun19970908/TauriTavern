@@ -1,6 +1,102 @@
 import { createAbortError, isAbortError } from './kernel/abort-error.js';
 import { streamResponse } from './http-utils.js';
 
+function getTypeTag(value) {
+    return Object.prototype.toString.call(value);
+}
+
+function isBinaryOrFormBody(value) {
+    const tag = getTypeTag(value);
+    return tag === '[object FormData]'
+        || tag === '[object Blob]'
+        || tag === '[object ArrayBuffer]'
+        || ArrayBuffer.isView(value);
+}
+
+function appendQueryParams(url, query) {
+    const cleaned = String(query || '').replace(/^\?+/, '');
+    if (!cleaned) {
+        return url;
+    }
+
+    const updated = new URL(url.href);
+    updated.search = updated.search ? `${updated.search}&${cleaned}` : `?${cleaned}`;
+    return updated;
+}
+
+function buildAjaxHeaders(rawHeaders, contentType, hasBody, skipDefaultContentType) {
+    const headers = new Headers();
+    if (rawHeaders instanceof Headers || getTypeTag(rawHeaders) === '[object Headers]') {
+        for (const [name, value] of rawHeaders.entries()) {
+            headers.append(name, value);
+        }
+    } else if (Array.isArray(rawHeaders)) {
+        for (const entry of rawHeaders) {
+            if (Array.isArray(entry) && entry.length >= 2 && entry[1] !== undefined && entry[1] !== null) {
+                headers.append(entry[0], String(entry[1]));
+            }
+        }
+    } else if (rawHeaders && typeof rawHeaders === 'object') {
+        for (const [name, value] of Object.entries(rawHeaders)) {
+            if (value !== undefined && value !== null) {
+                headers.set(name, String(value));
+            }
+        }
+    }
+
+    if (contentType !== false && !headers.has('content-type')) {
+        if (typeof contentType === 'string') {
+            const trimmed = contentType.trim();
+            if (trimmed) {
+                headers.set('content-type', trimmed);
+            }
+        } else if (contentType === undefined && hasBody && !skipDefaultContentType) {
+            headers.set('content-type', 'application/x-www-form-urlencoded; charset=UTF-8');
+        }
+    }
+
+    return headers;
+}
+
+function prepareAjaxRequest(requestUrl, options, $, signal) {
+    const method = String(options.type || options.method || 'GET').toUpperCase();
+    const isBodylessMethod = method === 'GET' || method === 'HEAD';
+    const processData = options.processData !== false;
+
+    let targetUrl = requestUrl;
+    let body = options.data;
+    const isSearchParams = getTypeTag(body) === '[object URLSearchParams]';
+    const binaryOrForm = isBinaryOrFormBody(body);
+
+    if (isBodylessMethod) {
+        if (body !== undefined && body !== null && processData) {
+            const query = typeof body === 'string'
+                ? body
+                : isSearchParams
+                    ? body.toString()
+                    : !binaryOrForm && typeof body === 'object'
+                        ? $.param(body, options.traditional)
+                        : '';
+            targetUrl = appendQueryParams(requestUrl, query);
+        }
+        body = undefined;
+    } else if (processData && body !== undefined && body !== null && typeof body === 'object' && !binaryOrForm && !isSearchParams) {
+        body = $.param(body, options.traditional);
+    }
+
+    const hasBody = body !== undefined && body !== null;
+    const headers = buildAjaxHeaders(options.headers, options.contentType, hasBody, binaryOrForm);
+    return {
+        targetUrl,
+        init: {
+            method,
+            headers,
+            body,
+            signal,
+        },
+    };
+}
+
 export function createInterceptors({
     originalFetch,
     canHandleRequest,
@@ -201,14 +297,8 @@ export function createInterceptors({
             jqXHR.abort = () => { controller.abort(); return jqXHR; };
 
             (async () => {
-                const init = {
-                    method: options.type || options.method || 'GET',
-                    headers: options.headers,
-                    body: options.data,
-                    signal: controller.signal,
-                };
-
-                const response = await routedResponse(requestUrl, options.url, init, targetWindow);
+                const { targetUrl, init } = prepareAjaxRequest(requestUrl, options, $, controller.signal);
+                const response = await routedResponse(targetUrl, options.url, init, targetWindow);
 
                 jqXHR.status = response.status;
                 jqXHR.readyState = 4;
