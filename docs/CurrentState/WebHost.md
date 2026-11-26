@@ -44,6 +44,7 @@ const host = installWebHost({
   - 流式响应见“生成流”；
   - 非 2xx 响应会变成错误，错误信息包含方法、路径、状态码和响应体，所以这时的 `body` 必须是字符串。
 - `backend.handle` 返回异步响应时，一个命令内的多次后端调用之间会让出事件循环；Web Host 不额外串行化这些调用。单页面使用与原先相同；需要跨页面并发写时由嵌入方自行串行化。
+- `nativeSettingsRevision: true` 时，设置保存把 revision 直接放在 `X-TauriTavern-Settings-Revision` 请求头里，交给后端在写盘时校验，不再先读完整 `/api/settings/get`。远程入口启用该模式；普通嵌入方默认关闭，保留原来的全量读取与 Persona 合并行为。
 - `store.load()` 与 `store.save(value)` 仍同步读写 Web Host 自己的一份文档，里面按名称分别存放 TT 设置、扩展存储条目与 MCP 注册。嵌入方原样保存它，不需要理解其内容。
 - 后端数据和 `store` 都归嵌入方所有。页面模板与 `default-state.json` 按静态文件读取，嵌入方需原样提供 vendor 镜像中的这些文件。
 - 返回的 `host.emit(name, payload)` 向 `__TAURI__.event.listen` 注册的监听器投递事件，回调收到的形状与 Tauri 相同：`{ event, id, payload }`。
@@ -129,7 +130,8 @@ PC 侧由两个进程组成，都不替代 Rust 后端：
 
 **设置提交**
 - revision 由后端决定：`get_sillytavern_settings` 原样保留 `/api/settings/get` 返回的 `tauritavern_settings_revision`（Rust 的分节 SHA-256）；只有后端没有该字段时，才回退到 Web Host 自己按设置字符串计算的 SHA-256。`finish_settings_commit` 同样原样返回 `/api/settings/save` 响应里的 revision，不能再用 Web Host 算法覆盖，否则下一次保存会拿错 revision 并 409。
-- `finish_settings_commit` 先读取当前 revision、检查后写入；不额外串行化并发提交，单页面顺序调用时行为与原先相同，后到且基于旧版本的保存仍会收到 `{ Conflict: message }`。
+- 远程入口开启 `nativeSettingsRevision`：`finish_settings_commit` 把 revision 作为 `X-TauriTavern-Settings-Revision` 透传给 `/api/settings/save`，由 PC 原生路由和 Rust 在写盘时校验，不再为了 revision 读取 `/api/settings/get`。普通嵌入后端仍走原来的全量读取、Persona 合并和 Web Host 侧校验。
+- `nativeSettingsRevision` 路径不额外串行化并发提交，单页面顺序调用时行为与原先相同，后到且基于旧版本的保存仍会收到 `{ Conflict: message }`。原生保存返回的 revision 缺失时直接报错，不再回退全量读取。
 - 提交里的 `power_user.personas` 与 `persona_descriptions` 只包含有变化的 Persona，没有提到的不表示删除。Web Host 保留后端里其余的 Persona，用提交的记录整条替换对应的 ID，再保存完整的 ST 设置。Persona 与 ST 设置之间的转换和前端共用 `tauri/main/kernel/persona-projection.js`。
 - 分块编码与原生相同：Android 用 `chunk-encoding: base64`，其他平台直接传字节。协议常量与内核共用 `tauri/main/kernel/byte-protocol.js`。
 - 设置、聊天、世界书与扩展存储共用 `protocols/byte-commit.js` 的分块会话机制。

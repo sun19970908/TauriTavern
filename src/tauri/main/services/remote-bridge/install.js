@@ -176,6 +176,13 @@ export function installRemoteBridge({
             controller.abort();
         },
     };
+    // Windows WebView2 suspends hidden views after a few minutes. A pending
+    // Web Lock is the documented workaround; without it the long-poll loop can
+    // stop while the desktop window is minimized, leaving remote requests 504.
+    const locks = globalThis.navigator?.locks;
+    if (locks?.request) {
+        void locks.request('tauritavern-remote-bridge', { mode: 'exclusive' }, () => new Promise(() => {}));
+    }
     globalThis.addEventListener('pagehide', active.stop, { once: true });
     void pollLoop();
     return active;

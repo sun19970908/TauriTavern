@@ -24,13 +24,14 @@ import { TAURI_GRACEFUL_EXIT_EVENT } from '../main/services/lifecycle/lifecycle-
  *   identity: import('../../scripts/util/host-identity.js').HostIdentity,
  *   backend: WebHostBackend,
  *   store: { load: () => Record<string, any> | null, save: (value: Record<string, any>) => void },
+ *   nativeSettingsRevision?: boolean,
  * }} WebHostOptions
  * @typedef {Record<string, (args: any, options: any) => any>} CommandHandlers
  * @typedef {{ load: () => any, save: (value: any) => void }} HostStatePart
  */
 
 /** Install before init.js. Backend and store belong to the embedding Session. @param {WebHostOptions} options */
-export function installWebHost({ identity, backend, store }) {
+export function installWebHost({ identity, backend, store, nativeSettingsRevision = false }) {
     Object.defineProperty(window, '__TAURITAVERN_HOST__', { value: Object.freeze({ ...identity }) });
     const fetchResource = window.fetch.bind(window);
     /** @type {Promise<any> | undefined} */
@@ -55,7 +56,7 @@ export function installWebHost({ identity, backend, store }) {
         ...createReadCommands(st),
         ...createChatCommands(st, resources),
         ...resources.commands,
-        ...createSettingsCommits(st),
+        ...createSettingsCommits(st, { nativeSettingsRevision }),
         ...createChatCommits(st),
         ...createWorldInfoCommits(st),
         ...createWriteCommands(st),

@@ -1,5 +1,7 @@
 // @ts-check
 
+import { createRandomId } from '../../main/kernel/random-id.js';
+
 /**
  * MCP registrations, kept in the store document. A new server starts paused, as on native; using one is not supported.
  * @param {import('../install.js').HostStatePart} part
@@ -12,7 +14,7 @@ export function createMcpCommands(part) {
         list_mcp_servers: () => ({ servers: structuredClone(servers()), storageIssues: [] }),
         create_mcp_server: ({ dto }) => {
             const server = {
-                id: crypto.randomUUID(), displayName: dto.displayName, endpoint: dto.endpoint, headers: dto.headers ?? {},
+                id: createRandomId(), displayName: dto.displayName, endpoint: dto.endpoint, headers: dto.headers ?? {},
                 protocolVersion: dto.protocolVersion ?? 'auto', state: 'paused', toolPermissions: {}, toolDescriptionOverrides: {},
             };
             part.save([...servers(), server]);

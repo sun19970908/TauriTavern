@@ -2,6 +2,7 @@ declare module 'droll';
 declare module '@iconfu/svg-inject';
 
 declare var __TAURITAVERN_HOST__: Readonly<import('./scripts/util/host-identity.js').HostIdentity> | undefined;
+declare var __TAURITAVERN_REMOTE__: { baseUrl: string } | undefined;
 
 // Global variables
 interface Window {
