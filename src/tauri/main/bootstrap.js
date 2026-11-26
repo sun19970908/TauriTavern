@@ -299,6 +299,7 @@ export function bootstrapTauriMain() {
         // relay them to the desktop app's native handlers.
         if (isRemoteWebHost && (
             url.pathname === '/api/chats/recent'
+            || url.pathname === '/api/chats/metadata'
             || url.pathname.startsWith('/api/presets/')
             || url.pathname.startsWith('/api/extensions/')
             || url.pathname.startsWith('/api/files/')

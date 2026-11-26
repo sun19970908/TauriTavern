@@ -264,6 +264,42 @@ for (const route of [
     });
 }
 
+test('/api/chats/metadata commits only the header value and maps integrity failures', async () => {
+    for (const scenario of [
+        { status: 200, body: { ok: true } },
+        { status: 400, body: { error: 'integrity' }, finishError: { BadRequest: 'integrity' } },
+    ]) {
+        const router = createRouteRegistry();
+        registerChatRoutes(router, {
+            stripJsonl,
+            resolveCharacterId: async () => 'Alice',
+        }, { jsonResponse });
+        const host = createCommitHost({ finishError: scenario.finishError });
+        const restore = installRuntime(HOSTS.macos, host.invoke);
+
+        try {
+            const response = await router.handle({
+                method: 'POST',
+                path: '/api/chats/metadata',
+                body: {
+                    ch_name: 'Alice',
+                    avatar_url: 'Alice.png',
+                    file_name: 'Story',
+                    chat_metadata: { variables: { score: 1 } },
+                },
+            });
+            assert.equal(response.status, scenario.status);
+            assert.deepEqual(await response.json(), scenario.body);
+            if (scenario.status === 200) {
+                const sent = Buffer.concat(host.frames.map(frame => Buffer.from(frame.bytes))).toString();
+                assert.deepEqual(JSON.parse(sent), { variables: { score: 1 } });
+            }
+        } finally {
+            restore();
+        }
+    }
+});
+
 test('cold commit captures source references before asynchronous transport', async () => {
     const payload = [{ chat_metadata:{}, tt_swipe_cold:{opaque_header_field:true} }, {mes:'active',swipe_id:1,swipes:[null,'active'],swipe_info:[null,{}],tt_swipe_cold:{sourceId:7,record:3}}];
     const host = createCommitHost({ expectedColdSourceId:7 });
