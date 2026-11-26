@@ -33,7 +33,9 @@ import { readBridgeConfig, readBridgeCredentials } from '../services/plugin-brid
  * Boundaries: request bodies are forwarded as UTF-8 text only (server plugin
  * APIs are JSON); FormData, URLSearchParams, and binary bodies are rejected
  * with 400 instead of being dropped. Browser-managed credentials (HTTP Basic
- * auth prompts) are not visible to fetch and are not forwarded.
+ * auth prompts) are not visible to fetch and are not forwarded. SillyTavern
+ * session cookies and `/csrf-token` handshakes are managed per host on the
+ * Rust side so cookies stay isolated from the WebView.
  */
 
 const PLUGIN_API_PREFIX = '/api/plugins/';
