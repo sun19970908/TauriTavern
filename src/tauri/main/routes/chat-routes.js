@@ -1,6 +1,8 @@
 import {
     loadCharacterChatPayload,
     loadGroupChatPayload,
+    saveCharacterChatMetadata,
+    saveCharacterChatMetadataExtension,
     saveCharacterChatPayload,
     saveGroupChatPayload,
 } from '../../../scripts/tauri/chat/transport.js';
@@ -50,6 +52,57 @@ export function registerChatRoutes(router, context, { jsonResponse }) {
             return jsonResponse(
                 {
                     error: 'Failed to load chat',
+                    details: extractErrorText(error),
+                },
+                500,
+            );
+        }
+    });
+
+    // Remote Web Host metadata commits send only the header value. Keeping this
+    // separate from /api/chats/save avoids reading and transferring the whole chat
+    // for a one-line metadata update.
+    router.post('/api/chats/metadata', async ({ body }) => {
+        const resolved = await resolveRouteCharacterId(context, {
+            avatar: body?.avatar_url,
+            fallbackName: body?.ch_name || body?.character_name,
+        });
+        if (resolved.responseBody) {
+            return jsonResponse(resolved.responseBody, 400);
+        }
+        const characterId = resolved.characterId;
+        const fileName = context.stripJsonl(body?.file_name || body?.chatfile || body?.file);
+        if (!characterId || !fileName.trim() || body?.chat_metadata === undefined) {
+            return jsonResponse({ error: 'Invalid chat metadata payload' }, 400);
+        }
+
+        try {
+            const namespace = typeof body?.namespace === 'string' ? body.namespace.trim() : '';
+            if (namespace) {
+                await saveCharacterChatMetadataExtension({
+                    characterName: characterId,
+                    avatarUrl: body?.avatar_url,
+                    fileName,
+                    namespace,
+                    value: body.chat_metadata,
+                });
+            } else {
+                await saveCharacterChatMetadata({
+                    characterName: characterId,
+                    avatarUrl: body?.avatar_url,
+                    fileName,
+                    chatMetadata: body.chat_metadata,
+                });
+            }
+            return jsonResponse({ ok: true });
+        } catch (error) {
+            if (error?.code === 'integrity') {
+                return jsonResponse({ error: 'integrity' }, 400);
+            }
+
+            return jsonResponse(
+                {
+                    error: 'Failed to save chat metadata',
                     details: extractErrorText(error),
                 },
                 500,

@@ -102,7 +102,7 @@ PC 侧由两个进程组成，都不替代 Rust 后端：
 | `sd_handle` | `/api/sd/<path>`，与原生一样原样返回状态码与响应体，失败由 SD 扩展自己处理 |
 | `get_world_info` | `/api/worldinfo/get`；打开聊天时会预读关联的世界书 |
 | `begin_settings_commit`、`append_settings_commit_chunk`、`finish_settings_commit`、`abort_settings_commit` | 最终写入 `/api/settings/save`，见"设置提交" |
-| `begin_chat_commit`、`append_chat_commit_chunk`、`finish_chat_commit`、`abort_chat_commit` | 完整聊天、metadata 与 metadata extension，最终写入 `/api/chats/save` |
+| `begin_chat_commit`、`append_chat_commit_chunk`、`finish_chat_commit`、`abort_chat_commit` | 完整聊天写 `/api/chats/save`；metadata 与 metadata extension 只把 header 值写 `/api/chats/metadata`，不再为一行元数据读取和传输整份聊天 |
 | `begin_world_info_commit`、`append_world_info_commit_chunk`、`finish_world_info_commit`、`abort_world_info_commit` | 提交的 `{ name, data }` 原样写入 `/api/worldinfo/edit` |
 | `save_theme` | `/api/themes/save` |
 | `save_quick_reply_set` | `/api/quick-replies/save` |

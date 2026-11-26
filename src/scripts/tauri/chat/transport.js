@@ -5,7 +5,7 @@ import {
     hasCharacterAvatarIdentity,
 } from '../../../tauri/main/services/characters/character-identity.js';
 import { createByteStreamService } from '../../../tauri/main/services/files/byte-stream-service.js';
-import { commitChatMetadata, commitChatPayload } from './commit.js';
+import { commitChatMetadata, commitChatMetadataExtension, commitChatPayload } from './commit.js';
 import { jsonlStreamToPayload } from './jsonl.js';
 import { loadColdChatPayload } from './cold-swipes.js';
 
@@ -67,6 +67,10 @@ export async function saveCharacterChatPayload({ characterName, avatarUrl, fileN
 
 export async function saveCharacterChatMetadata({ characterName, avatarUrl, fileName, chatMetadata }) {
     await commitChatMetadata({ target: characterTarget({ characterName, avatarUrl, fileName }), chatMetadata });
+}
+
+export async function saveCharacterChatMetadataExtension({ characterName, avatarUrl, fileName, namespace, value }) {
+    await commitChatMetadataExtension({ target: characterTarget({ characterName, avatarUrl, fileName }), namespace, value });
 }
 
 export async function loadGroupChatPayload({ id, allowNotFound = false, coldSwipes = false }) {
