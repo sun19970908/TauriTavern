@@ -31,6 +31,8 @@ export function createReadCommands(backend) {
         get_bootstrap_metadata: async () => ({
             characters: (await json('/api/characters/all')).map(characterDto), groups: await json('/api/groups/all'),
             avatars: await json('/api/avatars/get'), secret_state: await json('/api/secrets/read'),
+            available_chat_completion_sources: 'all',
+            available_text_completion_types: 'all',
         }),
         get_sillytavern_settings: async () => {
             const response = await json('/api/settings/get');
