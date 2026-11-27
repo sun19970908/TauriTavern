@@ -85,7 +85,7 @@ PC 侧由两个进程组成，都不替代 Rust 后端：
 | `get_sillytavern_settings`、`get_personas` | `/api/settings/get`，转为 TT 的形状 |
 | `read_secret_state` | `/api/secrets/read`，连接按钮刷新密钥状态 |
 | `get_character` | `/api/characters/get`，见“角色” |
-| `get_bootstrap_metadata` | `/api/characters/all`、`/api/groups/all`、`/api/avatars/get`、`/api/secrets/read` |
+| `get_bootstrap_metadata` | `/api/characters/all`、`/api/groups/all`、`/api/avatars/get`、`/api/secrets/read`；ST 实现全部聊天补全来源与文本补全类型，`available_chat_completion_sources` 与 `available_text_completion_types` 为 `'all'` |
 | `get_character_chats_by_id` | `/api/characters/chats`，结果须为数组，没有聊天时为 `[]`；ST 这时返回的 `{ error: true }` 会被拒绝 |
 | `open_chat_payload_jsonl`、`read_bytes`、`plugin:resources\|close` | `/api/chats/get`，见"聊天读取" |
 | `list_active_agent_runs` | 返回空集合，浏览器宿主不拥有原生 Agent Run |
