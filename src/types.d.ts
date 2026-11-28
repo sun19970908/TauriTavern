@@ -971,6 +971,11 @@ type TauriTavernMcpTestCallOutcome =
                 dataJson?: string;
             }
             | {
+                kind: 'rejected';
+                httpStatus: number;
+                retryAfter?: string;
+            }
+            | {
                 kind: 'unsupported_response';
                 responseType: string;
                 message: string;
